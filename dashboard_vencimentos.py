@@ -4,7 +4,7 @@ import plotly.express as px
 import streamlit.components.v1 as components
 import os
 import io
-from office365.runtime.auth.user_credential import UserCredential
+from office365.runtime.auth.client_credential import ClientCredential
 from office365.sharepoint.client_context import ClientContext
 
 # Configuração inicial da página do Streamlit
@@ -124,37 +124,43 @@ def ordenar_meses_cronologicamente(lista_meses):
         return (99, 0)
     return sorted(lista_meses, key=obter_chave)
 
-@st.cache_data(ttl=1800)  # Cache de 30 minutos
+@st.cache_data(ttl=1800)
 def carregar_e_consolidar_dados_sharepoint():
     """
-    CORREÇÃO: Função atualizada para baixar arquivo do SharePoint
-    com a sintaxe correta do método download().
+    CORREÇÃO: Autenticação via ClientCredential (App Registration)
     """
     try:
-        # Obter credenciais dos secrets (configurados no Streamlit Cloud)
+        # CORREÇÃO: Usar client_id, client_secret e tenant_id em vez de username/password
         site_url = st.secrets["sharepoint"]["site_url"]
-        username = st.secrets["sharepoint"]["username"]
-        password = st.secrets["sharepoint"]["password"]
+        tenant_id = st.secrets["sharepoint"]["tenant_id"]
+        client_id = st.secrets["sharepoint"]["client_id"]
+        client_secret = st.secrets["sharepoint"]["client_secret"]
         file_url = st.secrets["sharepoint"]["file_url"]
         
-        # Conectar ao SharePoint
-        ctx = ClientContext(site_url).with_credentials(UserCredential(username, password))
+        # CORREÇÃO: Usar ClientCredential em vez de UserCredential
+        credentials = ClientCredential(client_id, client_secret)
+        ctx = ClientContext(site_url).with_credentials(credentials)
         
-        # CORREÇÃO: Criar um objeto BytesIO para receber o download
+        # Verificar conexão
+        web = ctx.web
+        ctx.load(web)
+        ctx.execute_query()
+        
+        # Criar objeto para download
         file_object = io.BytesIO()
         
-        # CORREÇÃO: Passar o file_object como argumento do download()
+        # Baixar arquivo
         file = ctx.web.get_file_by_server_relative_url(file_url).download(file_object).execute_query()
         
-        # Ler Excel diretamente da memória
+        # Ler Excel da memória
         excel_data = file_object
         xl = pd.ExcelFile(excel_data, engine='openpyxl')
         
-        # Obter abas de lojas (que são números)
+        # Obter abas de lojas
         abas_lojas = [aba for aba in xl.sheet_names if aba.isdigit()]
         
         if not abas_lojas:
-            return None, "Nenhuma aba com nome numérico foi encontrada no arquivo."
+            return None, "Nenhuma aba com nome numérico encontrada."
         
         dados_consolidados = []
         for loja in abas_lojas:
@@ -167,10 +173,6 @@ def carregar_e_consolidar_dados_sharepoint():
                 dados_consolidados.append(df_limpo)
             
             elif 'Codigo' in df.columns or 'Código' in df.columns:
-                col_cod = 'Código' if 'Código' in df.columns else 'Codigo'
-                col_desc = 'Descrição' if 'Descrição' in df.columns else df.columns[1]
-                col_qtd = 'Qtde.' if 'Qtde.' in df.columns else df.columns[2]
-                
                 df_raw = xl.parse(loja, header=None)
                 mes_atual = "Não Informado"
                 linhas_finais = []
