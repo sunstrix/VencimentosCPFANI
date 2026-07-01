@@ -3,6 +3,9 @@ import streamlit as st
 import plotly.express as px
 import streamlit.components.v1 as components
 import os
+import io
+from office365.runtime.auth.user_credential import UserCredential
+from office365.sharepoint.client_context import ClientContext
 
 # Configuração inicial da página do Streamlit
 st.set_page_config(
@@ -90,9 +93,6 @@ div[data-testid="stMetricValue"] { font-size: 28px; font-weight: bold; color: #1
 </style>
 """, unsafe_allow_html=True)
 
-# CORREÇÃO: Atualizado o caminho para o novo usuário (MarisaAlmeida) e pasta de sistema em inglês (Documents).
-FILE_PATH = r"C:\Users\MarisaAlmeida\NSF cosméticos e presentes LTDA\NSF Cosméticos e Presentes LTDA - Documents\Fiscal\Marisa\Controle de vencimento\Controle de Vencimento - Matriz.xlsx"
-
 def formatar_vencimento_pt(val):
     val_str = str(val).strip()
     if not val_str or val_str.lower() in ['nan', 'none', 'não informado', 'nat'] or val_str == '00:00:00':
@@ -124,91 +124,108 @@ def ordenar_meses_cronologicamente(lista_meses):
         return (99, 0)
     return sorted(lista_meses, key=obter_chave)
 
-@st.cache_data
-def carregar_e_consolidar_dados(caminho_arquivo):
-    if not os.path.exists(caminho_arquivo):
-        return None, f"Arquivo não encontrado no caminho especificado: {caminho_arquivo}"
-    
+@st.cache_data(ttl=1800)  # Cache de 30 minutos
+def carregar_e_consolidar_dados_sharepoint():
+    """
+    CORREÇÃO: Função atualizada para baixar arquivo do SharePoint
+    em vez de ler de caminho local.
+    """
     try:
-        with open(caminho_arquivo, 'rb') as f:
-            xl = pd.ExcelFile(f, engine='openpyxl')
-            abas_lojas = [aba for aba in xl.sheet_names if aba.isdigit()]
+        # Obter credenciais dos secrets (configurados no Streamlit Cloud)
+        site_url = st.secrets["sharepoint"]["site_url"]
+        username = st.secrets["sharepoint"]["username"]
+        password = st.secrets["sharepoint"]["password"]
+        file_url = st.secrets["sharepoint"]["file_url"]
+        
+        # Conectar ao SharePoint
+        ctx = ClientContext(site_url).with_credentials(UserCredential(username, password))
+        
+        # Baixar o arquivo para memória
+        file = ctx.web.get_file_by_server_relative_url(file_url).download().execute_query()
+        
+        # Ler Excel diretamente da memória
+        excel_data = io.BytesIO(file.content)
+        xl = pd.ExcelFile(excel_data, engine='openpyxl')
+        
+        # Obter abas de lojas (que são números)
+        abas_lojas = [aba for aba in xl.sheet_names if aba.isdigit()]
+        
+        if not abas_lojas:
+            return None, "Nenhuma aba com nome numérico foi encontrada no arquivo."
+        
+        dados_consolidados = []
+        for loja in abas_lojas:
+            df = xl.parse(loja)
+            df.columns = [str(col).strip() for col in df.columns]
+             
+            if 'Vencimento' in df.columns and 'Codigo' in df.columns:
+                df_limpo = df[['Codigo', 'Descrição', 'Qtde.', 'Vencimento']].dropna(subset=['Codigo'])
+                df_limpo['Loja'] = str(loja).strip()
+                dados_consolidados.append(df_limpo)
             
-            if not abas_lojas:
-                return None, "Nenhuma aba com nome numérico foi encontrada no arquivo."
-            
-            dados_consolidados = []
-            for loja in abas_lojas:
-                df = xl.parse(loja)
-                df.columns = [str(col).strip() for col in df.columns]
-                 
-                if 'Vencimento' in df.columns and 'Codigo' in df.columns:
-                    df_limpo = df[['Codigo', 'Descrição', 'Qtde.', 'Vencimento']].dropna(subset=['Codigo'])
-                    df_limpo['Loja'] = str(loja).strip()
-                    dados_consolidados.append(df_limpo)
+            elif 'Codigo' in df.columns or 'Código' in df.columns:
+                col_cod = 'Código' if 'Código' in df.columns else 'Codigo'
+                col_desc = 'Descrição' if 'Descrição' in df.columns else df.columns[1]
+                col_qtd = 'Qtde.' if 'Qtde.' in df.columns else df.columns[2]
                 
-                elif 'Codigo' in df.columns or 'Código' in df.columns:
-                    col_cod = 'Código' if 'Código' in df.columns else 'Codigo'
-                    col_desc = 'Descrição' if 'Descrição' in df.columns else df.columns[1]
-                    col_qtd = 'Qtde.' if 'Qtde.' in df.columns else df.columns[2]
-                    
-                    df_raw = xl.parse(loja, header=None)
-                    mes_atual = "Não Informado"
-                    linhas_finais = []
-                    for idx, row in df_raw.iterrows():
-                        val_a = str(row[0]).strip() if pd.notna(row[0]) else ""
-                        val_b = str(row[1]).strip() if pd.notna(row[1]) else ""
-                        if "/" in val_a and len(val_a) <= 7 and not val_a.isdigit():
-                            mes_atual = val_a
-                        elif "/" in val_b and len(val_b) <= 7 and val_a == "":
-                            mes_atual = val_b
-                        if val_a.isdigit():
-                            linhas_finais.append({
-                                'Codigo': val_a, 'Descrição': val_b, 'Qtde.': row[2] if pd.notna(row[2]) else 0,
-                                'Vencimento': mes_atual, 'Loja': str(loja).strip()
-                            })
-                    if linhas_finais:
-                        dados_consolidados.append(pd.DataFrame(linhas_finais))
-                else:
-                    df_raw = xl.parse(loja, header=None)
-                    mes_atual = "Não Informado"
-                    linhas_finais = []
-                    for idx, row in df_raw.iterrows():
-                        if row.isnull().all(): continue
-                        val_a = str(row[0]).strip() if pd.notna(row[0]) else ""
-                        val_b = str(row[1]).strip() if pd.notna(row[1]) else ""
-                        if "/" in val_a and len(val_a) <= 7 and not val_a.isdigit():
-                            mes_atual = val_a
-                        elif "/" in val_b and len(val_b) <= 7 and val_a == "":
-                            mes_atual = val_b
-                        if val_a.isdigit():
-                            linhas_finais.append({
-                                'Codigo': val_a, 'Descrição': val_b, 'Qtde.': row[2] if pd.notna(row[2]) else 0,
-                                'Vencimento': mes_atual, 'Loja': str(loja).strip()
-                            })
-                    if linhas_finais:
-                        dados_consolidados.append(pd.DataFrame(linhas_finais))
+                df_raw = xl.parse(loja, header=None)
+                mes_atual = "Não Informado"
+                linhas_finais = []
+                for idx, row in df_raw.iterrows():
+                    val_a = str(row[0]).strip() if pd.notna(row[0]) else ""
+                    val_b = str(row[1]).strip() if pd.notna(row[1]) else ""
+                    if "/" in val_a and len(val_a) <= 7 and not val_a.isdigit():
+                        mes_atual = val_a
+                    elif "/" in val_b and len(val_b) <= 7 and val_a == "":
+                        mes_atual = val_b
+                    if val_a.isdigit():
+                        linhas_finais.append({
+                            'Codigo': val_a, 'Descrição': val_b, 'Qtde.': row[2] if pd.notna(row[2]) else 0,
+                            'Vencimento': mes_atual, 'Loja': str(loja).strip()
+                        })
+                if linhas_finais:
+                    dados_consolidados.append(pd.DataFrame(linhas_finais))
+            else:
+                df_raw = xl.parse(loja, header=None)
+                mes_atual = "Não Informado"
+                linhas_finais = []
+                for idx, row in df_raw.iterrows():
+                    if row.isnull().all(): continue
+                    val_a = str(row[0]).strip() if pd.notna(row[0]) else ""
+                    val_b = str(row[1]).strip() if pd.notna(row[1]) else ""
+                    if "/" in val_a and len(val_a) <= 7 and not val_a.isdigit():
+                        mes_atual = val_a
+                    elif "/" in val_b and len(val_b) <= 7 and val_a == "":
+                        mes_atual = val_b
+                    if val_a.isdigit():
+                        linhas_finais.append({
+                            'Codigo': val_a, 'Descrição': val_b, 'Qtde.': row[2] if pd.notna(row[2]) else 0,
+                            'Vencimento': mes_atual, 'Loja': str(loja).strip()
+                        })
+                if linhas_finais:
+                    dados_consolidados.append(pd.DataFrame(linhas_finais))
 
-            if not dados_consolidados:
-                return None, "Não foi possível extrair dados válidos."
-            
-            df_final = pd.concat(dados_consolidados, ignore_index=True)
-            df_final['Loja'] = df_final['Loja'].astype(str).str.strip()
-            df_final['Qtde.'] = pd.to_numeric(df_final['Qtde.'], errors='coerce').fillna(0).astype(int)
-            df_final['Codigo'] = df_final['Codigo'].astype(str).str.replace(r'\.0$', '', regex=True)
-            df_final['Descrição'] = df_final['Descrição'].astype(str).str.upper().str.strip()
-            df_final['Vencimento'] = df_final['Vencimento'].apply(formatar_vencimento_pt)
-            df_final = df_final[(df_final['Codigo'] != 'nan') & (df_final['Vencimento'] != 'Não Informado')]
-            
-            return df_final, None
+        if not dados_consolidados:
+            return None, "Não foi possível extrair dados válidos."
+        
+        df_final = pd.concat(dados_consolidados, ignore_index=True)
+        df_final['Loja'] = df_final['Loja'].astype(str).str.strip()
+        df_final['Qtde.'] = pd.to_numeric(df_final['Qtde.'], errors='coerce').fillna(0).astype(int)
+        df_final['Codigo'] = df_final['Codigo'].astype(str).str.replace(r'\.0$', '', regex=True)
+        df_final['Descrição'] = df_final['Descrição'].astype(str).str.upper().str.strip()
+        df_final['Vencimento'] = df_final['Vencimento'].apply(formatar_vencimento_pt)
+        df_final = df_final[(df_final['Codigo'] != 'nan') & (df_final['Vencimento'] != 'Não Informado')]
+        
+        return df_final, None
+        
     except Exception as e:
-        return None, f"Erro ao ler o arquivo Excel: {str(e)}"
+        return None, f"Erro ao conectar com SharePoint: {str(e)}"
 
 # Interface Principal
 st.title("📊 Dashboard de Controle de Vencimentos — Matriz")
 st.markdown("Consolidação automática de dados de todas as lojas para análise de vencimentos.")
 
-df, erro = carregar_e_consolidar_dados(FILE_PATH)
+df, erro = carregar_e_consolidar_dados_sharepoint()
 
 if erro:
     st.error(erro)
@@ -219,8 +236,6 @@ else:
     st.sidebar.header("🎯 Filtros de Análise")
     todas_lojas = sorted(df['Loja'].unique(), key=int)
     
-    # CORREÇÃO: Alterado o parâmetro 'default' para receber 'todas_lojas' integralmente, 
-    # removendo a condicional que limitava a seleção inicial a apenas 3 lojas.
     lojas_selecionadas = st.sidebar.multiselect("Selecione as Lojas:", todas_lojas, default=todas_lojas)
 
     todos_meses_ordenados = ordenar_meses_cronologicamente(df['Vencimento'].unique())
@@ -231,8 +246,6 @@ else:
     st.sidebar.markdown("---")
     st.sidebar.subheader("🖨️ Exportar Relatório")
     if st.sidebar.button("💾 Salvar Tela em PDF (A4)"):
-        # CORREÇÃO: Substituído `window.print()` por `window.parent.print()`. 
-        # Como o html() injeta um iframe, chamamos o documento pai para imprimir a página completa, escapando do iframe vazio.
         components.html("<script>setTimeout(function(){ window.parent.print(); }, 500);</script>", height=0)
 
     # Filtragem
