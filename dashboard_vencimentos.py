@@ -128,7 +128,7 @@ def ordenar_meses_cronologicamente(lista_meses):
 def carregar_e_consolidar_dados_sharepoint():
     """
     CORREÇÃO: Função atualizada para baixar arquivo do SharePoint
-    em vez de ler de caminho local.
+    com a sintaxe correta do método download().
     """
     try:
         # Obter credenciais dos secrets (configurados no Streamlit Cloud)
@@ -140,11 +140,14 @@ def carregar_e_consolidar_dados_sharepoint():
         # Conectar ao SharePoint
         ctx = ClientContext(site_url).with_credentials(UserCredential(username, password))
         
-        # Baixar o arquivo para memória
-        file = ctx.web.get_file_by_server_relative_url(file_url).download().execute_query()
+        # CORREÇÃO: Criar um objeto BytesIO para receber o download
+        file_object = io.BytesIO()
+        
+        # CORREÇÃO: Passar o file_object como argumento do download()
+        file = ctx.web.get_file_by_server_relative_url(file_url).download(file_object).execute_query()
         
         # Ler Excel diretamente da memória
-        excel_data = io.BytesIO(file.content)
+        excel_data = file_object
         xl = pd.ExcelFile(excel_data, engine='openpyxl')
         
         # Obter abas de lojas (que são números)
