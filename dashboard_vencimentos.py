@@ -127,15 +127,30 @@ def ordenar_meses_cronologicamente(lista_meses):
 @st.cache_data(ttl=1800)
 def carregar_e_consolidar_dados_sharepoint():
     """
-    CORREÇÃO: Autenticação via ClientCredential (App Registration)
+    CORREÇÃO: Autenticação via ClientCredential com validação dos secrets
     """
     try:
-        # CORREÇÃO: Usar client_id, client_secret e tenant_id em vez de username/password
-        site_url = st.secrets["sharepoint"]["site_url"]
-        tenant_id = st.secrets["sharepoint"]["tenant_id"]
-        client_id = st.secrets["sharepoint"]["client_id"]
-        client_secret = st.secrets["sharepoint"]["client_secret"]
-        file_url = st.secrets["sharepoint"]["file_url"]
+        # CORREÇÃO: Validar se os secrets existem antes de usar
+        if "sharepoint" not in st.secrets:
+            return None, "Erro: Secrets do SharePoint não configurados. Verifique as configurações do app."
+        
+        # Obter credenciais com validação
+        try:
+            site_url = st.secrets["sharepoint"]["site_url"]
+            tenant_id = st.secrets["sharepoint"]["tenant_id"]
+            client_id = st.secrets["sharepoint"]["client_id"]
+            client_secret = st.secrets["sharepoint"]["client_secret"]
+            file_url = st.secrets["sharepoint"]["file_url"]
+        except KeyError as e:
+            return None, f"Erro: Chave de secret ausente: {str(e)}. Verifique as configurações do app."
+        
+        # Validar se os valores não estão vazios
+        if not tenant_id or tenant_id.strip() == "":
+            return None, "Erro: tenant_id está vazio ou não configurado."
+        if not client_id or client_id.strip() == "":
+            return None, "Erro: client_id está vazio ou não configurado."
+        if not client_secret or client_secret.strip() == "":
+            return None, "Erro: client_secret está vazio ou não configurado."
         
         # CORREÇÃO: Usar ClientCredential em vez de UserCredential
         credentials = ClientCredential(client_id, client_secret)
