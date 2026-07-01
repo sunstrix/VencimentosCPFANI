@@ -16,80 +16,29 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilização customizada e Regras Corrigidas de Impressão (PDF A4)
+# Estilização customizada
 st.markdown("""
 <style>
 .main .block-container { padding-top: 2rem; }
 div[data-testid="stMetricValue"] { font-size: 28px; font-weight: bold; color: #1E3A8A; }
 
-/* Regras de Otimização para salvar em PDF (A4) */
 @media print {
-    @page {
-        size: A4 portrait;
-        margin: 0.8cm;
-    }
-
-    /* Esconde barra lateral, cabeçalho e botões */
-    [data-testid="stSidebar"], 
-    [data-testid="stHeader"], 
-    [data-testid="stToolbar"],
-    header, 
-    footer, 
-    .stButton,
-    div.stActionButton {
-        display: none !important;
-    }
-    
-    /* CORREÇÃO: Zoom moderado (0.75) para melhor legibilidade + controle de alturas */
+    @page { size: A4 portrait; margin: 0.8cm; }
+    [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"],
+    header, footer, .stButton, div.stActionButton { display: none !important; }
     html, body, [data-testid="stAppViewContainer"], .main, .block-container {
-        zoom: 0.75 !important;
-        height: auto !important;
-        width: 100% !important;
-        overflow: visible !important;
-        position: static !important;
+        zoom: 0.75 !important; height: auto !important; width: 100% !important;
+        overflow: visible !important; position: static !important;
     }
-    
-    .main .block-container {
-        max-width: 100% !important;
-        padding: 0.3cm !important;
-    }
-
-    /* Reduz títulos e métricas proporcionalmente */
+    .main .block-container { max-width: 100% !important; padding: 0.3cm !important; }
     h1 { font-size: 20px !important; margin: 5px 0 !important; }
     h2, h3, h4 { font-size: 14px !important; margin: 3px 0 !important; }
-    
-    div[data-testid="stMetricValue"] { 
-        font-size: 16px !important; 
-        font-weight: bold !important;
-    }
-    
-    div[data-testid="stMetricLabel"] {
-        font-size: 10px !important;
-    }
-
-    /* Força as cores de fundo */
-    body, .stApp {
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
-    }
-    
-    /* Controla altura dos gráficos para caber na página */
-    .stPlotlyChart {
-        page-break-inside: avoid !important;
-        max-height: 180px !important;
-    }
-    
-    /* Controla altura das tabelas */
-    div[data-testid="stDataFrame"] {
-        page-break-inside: avoid !important;
-        max-height: 200px !important;
-        font-size: 8px !important;
-    }
-    
-    /* Ajusta colunas para ficarem mais compactas */
-    .stColumns {
-        margin-bottom: 5px !important;
-    }
+    div[data-testid="stMetricValue"] { font-size: 16px !important; }
+    div[data-testid="stMetricLabel"] { font-size: 10px !important; }
+    body, .stApp { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    .stPlotlyChart { page-break-inside: avoid !important; max-height: 180px !important; }
+    div[data-testid="stDataFrame"] { page-break-inside: avoid !important; max-height: 200px !important; font-size: 8px !important; }
+    .stColumns { margin-bottom: 5px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -98,18 +47,14 @@ def formatar_vencimento_pt(val):
     val_str = str(val).strip()
     if not val_str or val_str.lower() in ['nan', 'none', 'não informado', 'nat'] or val_str == '00:00:00':
         return "Não Informado"
-    
-    meses_pt = {
-        1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
-        7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'
-    }
+    meses_pt = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+                7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
     try:
         dt = pd.to_datetime(val, errors='coerce')
         if pd.notnull(dt):
             return f"{meses_pt[dt.month]}/{str(dt.year)[-2:]}"
     except:
         pass
-
     if '/' in val_str and not val_str.replace('/', '').isdigit():
         partes = val_str.split('/')
         if len(partes) == 2:
@@ -127,85 +72,52 @@ def ordenar_meses_cronologicamente(lista_meses):
 
 @st.cache_data(ttl=1800)
 def carregar_e_consolidar_dados_sharepoint():
-    """
-    CORREÇÃO MSAL: Autenticação via Microsoft Entra ID moderno
-    Substitui ClientCredential (ACS legado desativado em abril/2026)
-    """
     try:
         # Validar secrets
         if "sharepoint" not in st.secrets:
-            return None, "❌ Secrets não configurados. Vá em Settings → Secrets no Streamlit Cloud"
+            return None, "❌ Secrets não configurados"
         
-        try:
-            site_url = st.secrets["sharepoint"]["site_url"]
-            tenant_id = st.secrets["sharepoint"]["tenant_id"]
-            client_id = st.secrets["sharepoint"]["client_id"]
-            client_secret = st.secrets["sharepoint"]["client_secret"]
-            file_url = st.secrets["sharepoint"]["file_url"]
-        except KeyError as e:
-            return None, f"❌ Secret ausente: {str(e)}. Verifique o nome exato nos secrets."
+        site_url = st.secrets["sharepoint"]["site_url"]
+        tenant_id = st.secrets["sharepoint"]["tenant_id"]
+        client_id = st.secrets["sharepoint"]["client_id"]
+        client_secret = st.secrets["sharepoint"]["client_secret"]
+        file_url = st.secrets["sharepoint"]["file_url"]
         
-        # Validar valores
-        if not tenant_id or tenant_id.strip() == "":
-            return None, "❌ tenant_id está vazio nos secrets"
-        if not client_id or client_id.strip() == "":
-            return None, "❌ client_id está vazio nos secrets"
-        if not client_secret or client_secret.strip() == "":
-            return None, "❌ client_secret está vazio nos secrets"
+        # MSAL: Obter access token
+        authority = f"https://login.microsoftonline.com/{tenant_id}"
+        app = msal.ConfidentialClientApplication(
+            client_id=client_id,
+            authority=authority,
+            client_credential=client_secret
+        )
         
-        # CORREÇÃO MSAL: Obter access token via Microsoft Entra ID moderno
-        try:
-            # Extrair tenant domain da site_url
-            parsed_url = urlparse(site_url)
-            sharepoint_domain = parsed_url.netloc  # didiernsf.sharepoint.com
-            
-            # Criar aplicação confidencial MSAL
-            authority = f"https://login.microsoftonline.com/{tenant_id}"
-            app = msal.ConfidentialClientApplication(
-                client_id=client_id,
-                authority=authority,
-                client_credential=client_secret
-            )
-            
-            # Escopo para SharePoint Online
-            scope = [f"https://{sharepoint_domain}/.default"]
-            
-            # Adquirir token para aplicativo (client credentials flow)
-            result = app.acquire_token_for_client(scopes=scope)
-            
-            if "error" in result:
-                return None, f"❌ Erro ao obter token MSAL: {result.get('error_description', result['error'])}"
-            
-            access_token = result["access_token"]
-            
-        except Exception as msal_error:
-            return None, f"❌ Erro na autenticação MSAL: {str(msal_error)}\n\nVerifique:\n1. Tenant ID correto\n2. Client ID correto\n3. Client Secret válido\n4. Permissão Sites.Selected concedida no Azure"
+        parsed_url = urlparse(site_url)
+        sharepoint_domain = parsed_url.netloc
+        scope = [f"https://{sharepoint_domain}/.default"]
         
-        # CORREÇÃO: Conectar ao SharePoint usando access token (não ClientCredential)
-        try:
-            ctx = ClientContext(site_url).with_access_token(access_token)
-            
-            # Testar conexão
-            web = ctx.web
-            ctx.load(web)
-            ctx.execute_query()
-            
-        except Exception as auth_error:
-            return None, f"❌ Erro ao conectar no SharePoint: {str(auth_error)}\n\nVerifique:\n1. Site URL: {site_url}\n2. Permissão Sites.Selected aplicada ao site via PowerShell/Graph"
+        result = app.acquire_token_for_client(scopes=scope)
+        
+        if "error" in result:
+            return None, f"❌ Erro MSAL: {result.get('error_description', result['error'])}"
+        
+        access_token = result["access_token"]
+        
+        # Conectar ao SharePoint com access token
+        ctx = ClientContext(site_url).with_access_token(access_token)
+        web = ctx.web
+        ctx.load(web)
+        ctx.execute_query()
         
         # Baixar arquivo
-        try:
-            file_object = io.BytesIO()
-            file = ctx.web.get_file_by_server_relative_url(file_url).download(file_object).execute_query()
-        except Exception as file_error:
-            return None, f"❌ Erro ao baixar arquivo: {str(file_error)}\n\nVerifique se file_url está correto:\n{file_url}"
+        file_object = io.BytesIO()
+        file = ctx.web.get_file_by_server_relative_url(file_url).download(file_object).execute_query()
         
         # Ler Excel
         xl = pd.ExcelFile(file_object, engine='openpyxl')
         abas_lojas = [aba for aba in xl.sheet_names if aba.isdigit()]
         
         if not abas_lojas:
-            return None, f"Nenhuma aba numérica encontrada. Abas disponíveis: {', '.join(xl.sheet_names[:5])}..."
+            return None, "Nenhuma aba numérica encontrada"
         
         dados_consolidados = []
         for loja in abas_lojas:
@@ -251,7 +163,7 @@ def carregar_e_consolidar_dados_sharepoint():
         return df_final, None
         
     except Exception as e:
-        return None, f"❌ Erro crítico: {type(e).__name__}: {str(e)}"
+        return None, f"❌ Erro: {type(e).__name__}: {str(e)}"
 
 # Interface Principal
 st.title("📊 Dashboard de Controle de Vencimentos — Matriz")
