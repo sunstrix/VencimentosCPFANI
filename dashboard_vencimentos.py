@@ -4,7 +4,9 @@ import plotly.express as px
 import streamlit.components.v1 as components
 import os
 import io
-from office365.runtime.auth.client_credential import ClientCredential
+import msal
+from urllib.parse import urlparse
+from office365.runtime.auth.token_response import TokenResponse
 from office365.sharepoint.client_context import ClientContext
 
 # Configuração inicial da página do Streamlit
@@ -127,34 +129,37 @@ def ordenar_meses_cronologicamente(lista_meses):
 @st.cache_data(ttl=1800)
 def carregar_e_consolidar_dados_sharepoint():
     """
-    CORREÇÃO: Autenticação via ClientCredential com validação dos secrets
+    CORREÇÃO: Autenticação via ClientCredential (App Registration)
     """
     try:
-        # CORREÇÃO: Validar se os secrets existem antes de usar
-        if "sharepoint" not in st.secrets:
-            return None, "Erro: Secrets do SharePoint não configurados. Verifique as configurações do app."
+        # CORREÇÃO: Usar client_id, client_secret e tenant_id em vez de username/password
+        site_url = st.secrets["sharepoint"]["site_url"]
+        tenant_id = st.secrets["sharepoint"]["tenant_id"]
+        client_id = st.secrets["sharepoint"]["client_id"]
+        client_secret = st.secrets["sharepoint"]["client_secret"]
+        file_url = st.secrets["sharepoint"]["file_url"]
         
-        # Obter credenciais com validação
-        try:
-            site_url = st.secrets["sharepoint"]["site_url"]
-            tenant_id = st.secrets["sharepoint"]["tenant_id"]
-            client_id = st.secrets["sharepoint"]["client_id"]
-            client_secret = st.secrets["sharepoint"]["client_secret"]
-            file_url = st.secrets["sharepoint"]["file_url"]
-        except KeyError as e:
-            return None, f"Erro: Chave de secret ausente: {str(e)}. Verifique as configurações do app."
-        
-        # Validar se os valores não estão vazios
-        if not tenant_id or tenant_id.strip() == "":
-            return None, "Erro: tenant_id está vazio ou não configurado."
-        if not client_id or client_id.strip() == "":
-            return None, "Erro: client_id está vazio ou não configurado."
-        if not client_secret or client_secret.strip() == "":
-            return None, "Erro: client_secret está vazio ou não configurado."
-        
-        # CORREÇÃO: Usar ClientCredential em vez de UserCredential
-        credentials = ClientCredential(client_id, client_secret)
-        ctx = ClientContext(site_url).with_credentials(credentials)
+        # CORREÇÃO: Obter token via MSAL (App Registration do Azure AD) em vez de
+        # ClientCredential/with_credentials, que é o fluxo antigo do SharePoint (ACS)
+        # e não usa o tenant_id — causava o erro AADSTS900023 (tenant identifier 'none').
+        parsed_url = urlparse(site_url)
+        resource = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        authority = f"https://login.microsoftonline.com/{tenant_id}"
+
+        def obter_token():
+            app_msal = msal.ConfidentialClientApplication(
+                client_id=client_id,
+                client_credential=client_secret,
+                authority=authority,
+            )
+            result = app_msal.acquire_token_for_client(scopes=[f"{resource}/.default"])
+            if "access_token" not in result:
+                raise Exception(
+                    result.get("error_description", f"Falha ao obter token: {result}")
+                )
+            return TokenResponse.from_json(result)
+
+        ctx = ClientContext(site_url).with_access_token(obter_token)
         
         # Verificar conexão
         web = ctx.web
