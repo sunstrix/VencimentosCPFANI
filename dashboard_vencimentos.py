@@ -6,6 +6,7 @@ import os
 import io
 import msal
 from office365.sharepoint.client_context import ClientContext
+from urllib.parse import urlparse
 
 # Configuração inicial da página do Streamlit
 st.set_page_config(
@@ -127,7 +128,7 @@ def ordenar_meses_cronologicamente(lista_meses):
 @st.cache_data(ttl=1800)
 def carregar_e_consolidar_dados_sharepoint():
     """
-    CORREÇÃO: Autenticação via MSAL (Microsoft Entra ID moderno)
+    CORREÇÃO MSAL: Autenticação via Microsoft Entra ID moderno
     Substitui ClientCredential (ACS legado desativado em abril/2026)
     """
     try:
@@ -155,8 +156,6 @@ def carregar_e_consolidar_dados_sharepoint():
         # CORREÇÃO MSAL: Obter access token via Microsoft Entra ID moderno
         try:
             # Extrair tenant domain da site_url
-            # Ex: https://didiernsf.sharepoint.com/sites/... → didiernsf.sharepoint.com
-            from urllib.parse import urlparse
             parsed_url = urlparse(site_url)
             sharepoint_domain = parsed_url.netloc  # didiernsf.sharepoint.com
             
