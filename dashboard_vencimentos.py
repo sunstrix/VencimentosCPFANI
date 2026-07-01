@@ -4,7 +4,7 @@ import plotly.express as px
 import streamlit.components.v1 as components
 import os
 import io
-from office365.runtime.auth.client_credential import ClientCredential
+import msal
 from office365.sharepoint.client_context import ClientContext
 
 # Configuração inicial da página do Streamlit
@@ -127,7 +127,8 @@ def ordenar_meses_cronologicamente(lista_meses):
 @st.cache_data(ttl=1800)
 def carregar_e_consolidar_dados_sharepoint():
     """
-    CORREÇÃO: Autenticação via ClientCredential (App Registration)
+    CORREÇÃO: Autenticação via MSAL (Microsoft Entra ID moderno)
+    Substitui ClientCredential (ACS legado desativado em abril/2026)
     """
     try:
         # Validar secrets
@@ -151,17 +152,47 @@ def carregar_e_consolidar_dados_sharepoint():
         if not client_secret or client_secret.strip() == "":
             return None, "❌ client_secret está vazio nos secrets"
         
-        # Conectar ao SharePoint
-        credentials = ClientCredential(client_id, client_secret)
-        ctx = ClientContext(site_url).with_credentials(credentials)
-        
-        # Testar conexão
+        # CORREÇÃO MSAL: Obter access token via Microsoft Entra ID moderno
         try:
+            # Extrair tenant domain da site_url
+            # Ex: https://didiernsf.sharepoint.com/sites/... → didiernsf.sharepoint.com
+            from urllib.parse import urlparse
+            parsed_url = urlparse(site_url)
+            sharepoint_domain = parsed_url.netloc  # didiernsf.sharepoint.com
+            
+            # Criar aplicação confidencial MSAL
+            authority = f"https://login.microsoftonline.com/{tenant_id}"
+            app = msal.ConfidentialClientApplication(
+                client_id=client_id,
+                authority=authority,
+                client_credential=client_secret
+            )
+            
+            # Escopo para SharePoint Online
+            scope = [f"https://{sharepoint_domain}/.default"]
+            
+            # Adquirir token para aplicativo (client credentials flow)
+            result = app.acquire_token_for_client(scopes=scope)
+            
+            if "error" in result:
+                return None, f"❌ Erro ao obter token MSAL: {result.get('error_description', result['error'])}"
+            
+            access_token = result["access_token"]
+            
+        except Exception as msal_error:
+            return None, f"❌ Erro na autenticação MSAL: {str(msal_error)}\n\nVerifique:\n1. Tenant ID correto\n2. Client ID correto\n3. Client Secret válido\n4. Permissão Sites.Selected concedida no Azure"
+        
+        # CORREÇÃO: Conectar ao SharePoint usando access token (não ClientCredential)
+        try:
+            ctx = ClientContext(site_url).with_access_token(access_token)
+            
+            # Testar conexão
             web = ctx.web
             ctx.load(web)
             ctx.execute_query()
+            
         except Exception as auth_error:
-            return None, f"❌ Erro de autenticação: {str(auth_error)}\n\nVerifique:\n1. Tenant ID: {tenant_id[:20]}...\n2. Client ID: {client_id[:20]}...\n3. Permissões concedidas no Azure"
+            return None, f"❌ Erro ao conectar no SharePoint: {str(auth_error)}\n\nVerifique:\n1. Site URL: {site_url}\n2. Permissão Sites.Selected aplicada ao site via PowerShell/Graph"
         
         # Baixar arquivo
         try:
