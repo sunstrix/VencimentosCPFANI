@@ -15,29 +15,80 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilização customizada
+# Estilização customizada e Regras Corrigidas de Impressão (PDF A4)
 st.markdown("""
 <style>
 .main .block-container { padding-top: 2rem; }
 div[data-testid="stMetricValue"] { font-size: 28px; font-weight: bold; color: #1E3A8A; }
 
+/* Regras de Otimização para salvar em PDF (A4) */
 @media print {
-    @page { size: A4 portrait; margin: 0.8cm; }
-    [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"],
-    header, footer, .stButton, div.stActionButton { display: none !important; }
-    html, body, [data-testid="stAppViewContainer"], .main, .block-container {
-        zoom: 0.75 !important; height: auto !important; width: 100% !important;
-        overflow: visible !important; position: static !important;
+    @page {
+        size: A4 portrait;
+        margin: 0.8cm;
     }
-    .main .block-container { max-width: 100% !important; padding: 0.3cm !important; }
+
+    /* Esconde barra lateral, cabeçalho e botões */
+    [data-testid="stSidebar"], 
+    [data-testid="stHeader"], 
+    [data-testid="stToolbar"],
+    header, 
+    footer, 
+    .stButton,
+    div.stActionButton {
+        display: none !important;
+    }
+    
+    /* CORREÇÃO: Zoom moderado (0.75) para melhor legibilidade + controle de alturas */
+    html, body, [data-testid="stAppViewContainer"], .main, .block-container {
+        zoom: 0.75 !important;
+        height: auto !important;
+        width: 100% !important;
+        overflow: visible !important;
+        position: static !important;
+    }
+    
+    .main .block-container {
+        max-width: 100% !important;
+        padding: 0.3cm !important;
+    }
+
+    /* Reduz títulos e métricas proporcionalmente */
     h1 { font-size: 20px !important; margin: 5px 0 !important; }
     h2, h3, h4 { font-size: 14px !important; margin: 3px 0 !important; }
-    div[data-testid="stMetricValue"] { font-size: 16px !important; }
-    div[data-testid="stMetricLabel"] { font-size: 10px !important; }
-    body, .stApp { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-    .stPlotlyChart { page-break-inside: avoid !important; max-height: 180px !important; }
-    div[data-testid="stDataFrame"] { page-break-inside: avoid !important; max-height: 200px !important; font-size: 8px !important; }
-    .stColumns { margin-bottom: 5px !important; }
+    
+    div[data-testid="stMetricValue"] { 
+        font-size: 16px !important; 
+        font-weight: bold !important;
+    }
+    
+    div[data-testid="stMetricLabel"] {
+        font-size: 10px !important;
+    }
+
+    /* Força as cores de fundo */
+    body, .stApp {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+    
+    /* Controla altura dos gráficos para caber na página */
+    .stPlotlyChart {
+        page-break-inside: avoid !important;
+        max-height: 180px !important;
+    }
+    
+    /* Controla altura das tabelas */
+    div[data-testid="stDataFrame"] {
+        page-break-inside: avoid !important;
+        max-height: 200px !important;
+        font-size: 8px !important;
+    }
+    
+    /* Ajusta colunas para ficarem mais compactas */
+    .stColumns {
+        margin-bottom: 5px !important;
+    }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -46,14 +97,18 @@ def formatar_vencimento_pt(val):
     val_str = str(val).strip()
     if not val_str or val_str.lower() in ['nan', 'none', 'não informado', 'nat'] or val_str == '00:00:00':
         return "Não Informado"
-    meses_pt = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
-                7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
+    
+    meses_pt = {
+        1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+        7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'
+    }
     try:
         dt = pd.to_datetime(val, errors='coerce')
         if pd.notnull(dt):
             return f"{meses_pt[dt.month]}/{str(dt.year)[-2:]}"
     except:
         pass
+
     if '/' in val_str and not val_str.replace('/', '').isdigit():
         partes = val_str.split('/')
         if len(partes) == 2:
@@ -71,6 +126,9 @@ def ordenar_meses_cronologicamente(lista_meses):
 
 @st.cache_data(ttl=1800)
 def carregar_e_consolidar_dados_sharepoint():
+    """
+    CORREÇÃO: Autenticação via ClientCredential (App Registration)
+    """
     try:
         # Validar secrets
         if "sharepoint" not in st.secrets:
