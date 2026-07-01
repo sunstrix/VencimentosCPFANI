@@ -6,6 +6,7 @@ import os
 import io
 import msal
 from office365.sharepoint.client_context import ClientContext
+from office365.runtime.auth.token_response import TokenResponse
 from urllib.parse import urlparse
 
 # Configuração inicial da página do Streamlit
@@ -103,7 +104,10 @@ def carregar_e_consolidar_dados_sharepoint():
         access_token = result["access_token"]
         
         # Conectar ao SharePoint com access token
-        ctx = ClientContext(site_url).with_access_token(access_token)
+        # CORREÇÃO: with_access_token() espera um CALLABLE que retorna um TokenResponse,
+        # e não a string do token diretamente. Passar a string causava o erro
+        # "TypeError: 'str' object is not callable" quando a lib tentava executar o token como função.
+        ctx = ClientContext(site_url).with_access_token(lambda: TokenResponse(access_token=access_token))
         web = ctx.web
         ctx.load(web)
         ctx.execute_query()
