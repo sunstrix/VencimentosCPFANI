@@ -4,9 +4,7 @@ import plotly.express as px
 import streamlit.components.v1 as components
 import os
 import io
-import msal
-from urllib.parse import urlparse
-from office365.runtime.auth.token_response import TokenResponse
+from office365.runtime.auth.client_credential import ClientCredential
 from office365.sharepoint.client_context import ClientContext
 
 # Configuração inicial da página do Streamlit
@@ -17,80 +15,29 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilização customizada e Regras Corrigidas de Impressão (PDF A4)
+# Estilização customizada
 st.markdown("""
 <style>
 .main .block-container { padding-top: 2rem; }
 div[data-testid="stMetricValue"] { font-size: 28px; font-weight: bold; color: #1E3A8A; }
 
-/* Regras de Otimização para salvar em PDF (A4) */
 @media print {
-    @page {
-        size: A4 portrait;
-        margin: 0.8cm;
-    }
-
-    /* Esconde barra lateral, cabeçalho e botões */
-    [data-testid="stSidebar"], 
-    [data-testid="stHeader"], 
-    [data-testid="stToolbar"],
-    header, 
-    footer, 
-    .stButton,
-    div.stActionButton {
-        display: none !important;
-    }
-    
-    /* CORREÇÃO: Zoom moderado (0.75) para melhor legibilidade + controle de alturas */
+    @page { size: A4 portrait; margin: 0.8cm; }
+    [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"],
+    header, footer, .stButton, div.stActionButton { display: none !important; }
     html, body, [data-testid="stAppViewContainer"], .main, .block-container {
-        zoom: 0.75 !important;
-        height: auto !important;
-        width: 100% !important;
-        overflow: visible !important;
-        position: static !important;
+        zoom: 0.75 !important; height: auto !important; width: 100% !important;
+        overflow: visible !important; position: static !important;
     }
-    
-    .main .block-container {
-        max-width: 100% !important;
-        padding: 0.3cm !important;
-    }
-
-    /* Reduz títulos e métricas proporcionalmente */
+    .main .block-container { max-width: 100% !important; padding: 0.3cm !important; }
     h1 { font-size: 20px !important; margin: 5px 0 !important; }
     h2, h3, h4 { font-size: 14px !important; margin: 3px 0 !important; }
-    
-    div[data-testid="stMetricValue"] { 
-        font-size: 16px !important; 
-        font-weight: bold !important;
-    }
-    
-    div[data-testid="stMetricLabel"] {
-        font-size: 10px !important;
-    }
-
-    /* Força as cores de fundo */
-    body, .stApp {
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
-    }
-    
-    /* Controla altura dos gráficos para caber na página */
-    .stPlotlyChart {
-        page-break-inside: avoid !important;
-        max-height: 180px !important;
-    }
-    
-    /* Controla altura das tabelas */
-    div[data-testid="stDataFrame"] {
-        page-break-inside: avoid !important;
-        max-height: 200px !important;
-        font-size: 8px !important;
-    }
-    
-    /* Ajusta colunas para ficarem mais compactas */
-    .stColumns {
-        margin-bottom: 5px !important;
-    }
+    div[data-testid="stMetricValue"] { font-size: 16px !important; }
+    div[data-testid="stMetricLabel"] { font-size: 10px !important; }
+    body, .stApp { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    .stPlotlyChart { page-break-inside: avoid !important; max-height: 180px !important; }
+    div[data-testid="stDataFrame"] { page-break-inside: avoid !important; max-height: 200px !important; font-size: 8px !important; }
+    .stColumns { margin-bottom: 5px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -99,18 +46,14 @@ def formatar_vencimento_pt(val):
     val_str = str(val).strip()
     if not val_str or val_str.lower() in ['nan', 'none', 'não informado', 'nat'] or val_str == '00:00:00':
         return "Não Informado"
-    
-    meses_pt = {
-        1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
-        7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'
-    }
+    meses_pt = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+                7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
     try:
         dt = pd.to_datetime(val, errors='coerce')
         if pd.notnull(dt):
             return f"{meses_pt[dt.month]}/{str(dt.year)[-2:]}"
     except:
         pass
-
     if '/' in val_str and not val_str.replace('/', '').isdigit():
         partes = val_str.split('/')
         if len(partes) == 2:
@@ -128,88 +71,53 @@ def ordenar_meses_cronologicamente(lista_meses):
 
 @st.cache_data(ttl=1800)
 def carregar_e_consolidar_dados_sharepoint():
-    """
-    CORREÇÃO: Autenticação via ClientCredential (App Registration)
-    """
     try:
-        # CORREÇÃO: Usar client_id, client_secret e tenant_id em vez de username/password
-        site_url = st.secrets["sharepoint"]["site_url"]
-        tenant_id = st.secrets["sharepoint"]["tenant_id"]
-        client_id = st.secrets["sharepoint"]["client_id"]
-        client_secret = st.secrets["sharepoint"]["client_secret"]
-        file_url = st.secrets["sharepoint"]["file_url"]
+        # Validar secrets
+        if "sharepoint" not in st.secrets:
+            return None, "Erro: Secrets não configurados. Verifique Settings → Secrets"
         
-        # CORREÇÃO: Obter token via MSAL (App Registration do Azure AD) em vez de
-        # ClientCredential/with_credentials, que é o fluxo antigo do SharePoint (ACS)
-        # e não usa o tenant_id — causava o erro AADSTS900023 (tenant identifier 'none').
-        parsed_url = urlparse(site_url)
-        resource = f"{parsed_url.scheme}://{parsed_url.netloc}"
-        authority = f"https://login.microsoftonline.com/{tenant_id}"
-
-        def obter_token():
-            app_msal = msal.ConfidentialClientApplication(
-                client_id=client_id,
-                client_credential=client_secret,
-                authority=authority,
-            )
-            result = app_msal.acquire_token_for_client(scopes=[f"{resource}/.default"])
-            if "access_token" not in result:
-                raise Exception(
-                    result.get("error_description", f"Falha ao obter token: {result}")
-                )
-            return TokenResponse.from_json(result)
-
-        ctx = ClientContext(site_url).with_access_token(obter_token)
+        try:
+            site_url = st.secrets["sharepoint"]["site_url"]
+            tenant_id = st.secrets["sharepoint"]["tenant_id"]
+            client_id = st.secrets["sharepoint"]["client_id"]
+            client_secret = st.secrets["sharepoint"]["client_secret"]
+            file_url = st.secrets["sharepoint"]["file_url"]
+        except KeyError as e:
+            return None, f"Erro: Secret ausente: {str(e)}"
         
-        # Verificar conexão
+        # Validar valores
+        if not all([client_id, client_secret, tenant_id]):
+            return None, "Erro: Client ID, Secret ou Tenant ID vazios"
+        
+        # Conectar ao SharePoint
+        credentials = ClientCredential(client_id, client_secret)
+        ctx = ClientContext(site_url).with_credentials(credentials)
+        
+        # Testar conexão
         web = ctx.web
         ctx.load(web)
         ctx.execute_query()
         
-        # Criar objeto para download
-        file_object = io.BytesIO()
-        
         # Baixar arquivo
+        file_object = io.BytesIO()
         file = ctx.web.get_file_by_server_relative_url(file_url).download(file_object).execute_query()
         
-        # Ler Excel da memória
-        excel_data = file_object
-        xl = pd.ExcelFile(excel_data, engine='openpyxl')
-        
-        # Obter abas de lojas
+        # Ler Excel
+        xl = pd.ExcelFile(file_object, engine='openpyxl')
         abas_lojas = [aba for aba in xl.sheet_names if aba.isdigit()]
         
         if not abas_lojas:
-            return None, "Nenhuma aba com nome numérico encontrada."
+            return None, "Nenhuma aba numérica encontrada"
         
         dados_consolidados = []
         for loja in abas_lojas:
             df = xl.parse(loja)
             df.columns = [str(col).strip() for col in df.columns]
-             
+            
             if 'Vencimento' in df.columns and 'Codigo' in df.columns:
                 df_limpo = df[['Codigo', 'Descrição', 'Qtde.', 'Vencimento']].dropna(subset=['Codigo'])
                 df_limpo['Loja'] = str(loja).strip()
                 dados_consolidados.append(df_limpo)
-            
-            elif 'Codigo' in df.columns or 'Código' in df.columns:
-                df_raw = xl.parse(loja, header=None)
-                mes_atual = "Não Informado"
-                linhas_finais = []
-                for idx, row in df_raw.iterrows():
-                    val_a = str(row[0]).strip() if pd.notna(row[0]) else ""
-                    val_b = str(row[1]).strip() if pd.notna(row[1]) else ""
-                    if "/" in val_a and len(val_a) <= 7 and not val_a.isdigit():
-                        mes_atual = val_a
-                    elif "/" in val_b and len(val_b) <= 7 and val_a == "":
-                        mes_atual = val_b
-                    if val_a.isdigit():
-                        linhas_finais.append({
-                            'Codigo': val_a, 'Descrição': val_b, 'Qtde.': row[2] if pd.notna(row[2]) else 0,
-                            'Vencimento': mes_atual, 'Loja': str(loja).strip()
-                        })
-                if linhas_finais:
-                    dados_consolidados.append(pd.DataFrame(linhas_finais))
             else:
                 df_raw = xl.parse(loja, header=None)
                 mes_atual = "Não Informado"
@@ -224,14 +132,15 @@ def carregar_e_consolidar_dados_sharepoint():
                         mes_atual = val_b
                     if val_a.isdigit():
                         linhas_finais.append({
-                            'Codigo': val_a, 'Descrição': val_b, 'Qtde.': row[2] if pd.notna(row[2]) else 0,
+                            'Codigo': val_a, 'Descrição': val_b,
+                            'Qtde.': row[2] if pd.notna(row[2]) else 0,
                             'Vencimento': mes_atual, 'Loja': str(loja).strip()
                         })
                 if linhas_finais:
                     dados_consolidados.append(pd.DataFrame(linhas_finais))
-
+        
         if not dados_consolidados:
-            return None, "Não foi possível extrair dados válidos."
+            return None, "Nenhum dado válido extraído"
         
         df_final = pd.concat(dados_consolidados, ignore_index=True)
         df_final['Loja'] = df_final['Loja'].astype(str).str.strip()
@@ -244,7 +153,7 @@ def carregar_e_consolidar_dados_sharepoint():
         return df_final, None
         
     except Exception as e:
-        return None, f"Erro ao conectar com SharePoint: {str(e)}"
+        return None, f"Erro SharePoint: {str(e)}"
 
 # Interface Principal
 st.title("📊 Dashboard de Controle de Vencimentos — Matriz")
@@ -257,30 +166,23 @@ if erro:
 elif df is None or df.empty:
     st.warning("⚠️ Nenhum dado encontrado.")
 else:
-    # --- BARRA LATERAL DE FILTROS ---
     st.sidebar.header("🎯 Filtros de Análise")
     todas_lojas = sorted(df['Loja'].unique(), key=int)
-    
     lojas_selecionadas = st.sidebar.multiselect("Selecione as Lojas:", todas_lojas, default=todas_lojas)
-
     todos_meses_ordenados = ordenar_meses_cronologicamente(df['Vencimento'].unique())
     meses_selecionados = st.sidebar.multiselect("Selecione os Meses:", todos_meses_ordenados, default=todos_meses_ordenados)
-
     busca_produto = st.sidebar.text_input("Buscar por Produto:").upper()
-
     st.sidebar.markdown("---")
     st.sidebar.subheader("🖨️ Exportar Relatório")
     if st.sidebar.button("💾 Salvar Tela em PDF (A4)"):
         components.html("<script>setTimeout(function(){ window.parent.print(); }, 500);</script>", height=0)
 
-    # Filtragem
     df_filtrado = df[df['Loja'].isin(lojas_selecionadas) & df['Vencimento'].isin(meses_selecionados)]
     if busca_produto:
         df_filtrado = df_filtrado[df_filtrado['Descrição'].str.contains(busca_produto) | df_filtrado['Codigo'].str.contains(busca_produto)]
 
     df_produto_agrupado = df_filtrado.groupby(['Codigo', 'Descrição'])['Qtde.'].sum().reset_index().sort_values(by='Qtde.', ascending=False)
 
-    # --- KPIs ---
     col1, col2, col3, col4 = st.columns(4)
     with col1: st.metric("Total de Itens a Vencer", f"{df_filtrado['Qtde.'].sum():,}")
     with col2: st.metric("Lojas Analisadas", len(df_filtrado['Loja'].unique()))
@@ -288,7 +190,6 @@ else:
     with col4: st.metric("Meses com Alertas", len(df_filtrado['Vencimento'].unique()))
     st.markdown("---")
 
-    # --- GRÁFICOS LINHA 1 ---
     col_graf1, col_graf2 = st.columns(2)
     with col_graf1:
         st.subheader("🗓️ Volume por Mês")
@@ -314,7 +215,6 @@ else:
             st.plotly_chart(fig_loja, use_container_width=True)
     st.markdown("---")
 
-    # --- GRÁFICOS LINHA 2 ---
     st.subheader("📦 Top 15 Produtos a Vencer")
     if not df_produto_agrupado.empty:
         df_top_produtos = df_produto_agrupado.head(15).copy()
@@ -324,13 +224,11 @@ else:
         st.plotly_chart(fig_prod, use_container_width=True)
     st.markdown("---")
 
-    # --- TABELAS ---
     col_tab1, col_tab2 = st.columns(2)
     with col_tab1:
         st.subheader("🛒 Resumo por Produto")
         if not df_produto_agrupado.empty:
             st.dataframe(df_produto_agrupado, use_container_width=True, hide_index=True, height=250)
-            
     with col_tab2:
         st.subheader("📋 Lista (Loja a Loja)")
         df_exibicao = df_filtrado.copy()
