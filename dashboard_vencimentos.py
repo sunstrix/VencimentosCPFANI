@@ -4,9 +4,8 @@ import plotly.express as px
 import streamlit.components.v1 as components
 import os
 import io
-import msal
-from office365.sharepoint.client_context import ClientContext
-from urllib.parse import urlparse
+import requests
+from urllib.parse import urlparse, parse_qs, unquote
 
 # Configuração inicial da página do Streamlit
 st.set_page_config(
@@ -16,80 +15,29 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilização customizada e Regras Corrigidas de Impressão (PDF A4)
+# Estilização customizada
 st.markdown("""
 <style>
 .main .block-container { padding-top: 2rem; }
 div[data-testid="stMetricValue"] { font-size: 28px; font-weight: bold; color: #1E3A8A; }
 
-/* Regras de Otimização para salvar em PDF (A4) */
 @media print {
-    @page {
-        size: A4 portrait;
-        margin: 0.8cm;
-    }
-
-    /* Esconde barra lateral, cabeçalho e botões */
-    [data-testid="stSidebar"], 
-    [data-testid="stHeader"], 
-    [data-testid="stToolbar"],
-    header, 
-    footer, 
-    .stButton,
-    div.stActionButton {
-        display: none !important;
-    }
-    
-    /* CORREÇÃO: Zoom moderado (0.75) para melhor legibilidade + controle de alturas */
+    @page { size: A4 portrait; margin: 0.8cm; }
+    [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"],
+    header, footer, .stButton, div.stActionButton { display: none !important; }
     html, body, [data-testid="stAppViewContainer"], .main, .block-container {
-        zoom: 0.75 !important;
-        height: auto !important;
-        width: 100% !important;
-        overflow: visible !important;
-        position: static !important;
+        zoom: 0.75 !important; height: auto !important; width: 100% !important;
+        overflow: visible !important; position: static !important;
     }
-    
-    .main .block-container {
-        max-width: 100% !important;
-        padding: 0.3cm !important;
-    }
-
-    /* Reduz títulos e métricas proporcionalmente */
+    .main .block-container { max-width: 100% !important; padding: 0.3cm !important; }
     h1 { font-size: 20px !important; margin: 5px 0 !important; }
     h2, h3, h4 { font-size: 14px !important; margin: 3px 0 !important; }
-    
-    div[data-testid="stMetricValue"] { 
-        font-size: 16px !important; 
-        font-weight: bold !important;
-    }
-    
-    div[data-testid="stMetricLabel"] {
-        font-size: 10px !important;
-    }
-
-    /* Força as cores de fundo */
-    body, .stApp {
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;
-    }
-    
-    /* Controla altura dos gráficos para caber na página */
-    .stPlotlyChart {
-        page-break-inside: avoid !important;
-        max-height: 180px !important;
-    }
-    
-    /* Controla altura das tabelas */
-    div[data-testid="stDataFrame"] {
-        page-break-inside: avoid !important;
-        max-height: 200px !important;
-        font-size: 8px !important;
-    }
-    
-    /* Ajusta colunas para ficarem mais compactas */
-    .stColumns {
-        margin-bottom: 5px !important;
-    }
+    div[data-testid="stMetricValue"] { font-size: 16px !important; }
+    div[data-testid="stMetricLabel"] { font-size: 10px !important; }
+    body, .stApp { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    .stPlotlyChart { page-break-inside: avoid !important; max-height: 180px !important; }
+    div[data-testid="stDataFrame"] { page-break-inside: avoid !important; max-height: 200px !important; font-size: 8px !important; }
+    .stColumns { margin-bottom: 5px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -98,18 +46,14 @@ def formatar_vencimento_pt(val):
     val_str = str(val).strip()
     if not val_str or val_str.lower() in ['nan', 'none', 'não informado', 'nat'] or val_str == '00:00:00':
         return "Não Informado"
-    
-    meses_pt = {
-        1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
-        7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'
-    }
+    meses_pt = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+                7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
     try:
         dt = pd.to_datetime(val, errors='coerce')
         if pd.notnull(dt):
             return f"{meses_pt[dt.month]}/{str(dt.year)[-2:]}"
     except:
         pass
-
     if '/' in val_str and not val_str.replace('/', '').isdigit():
         partes = val_str.split('/')
         if len(partes) == 2:
@@ -125,87 +69,96 @@ def ordenar_meses_cronologicamente(lista_meses):
         return (99, 0)
     return sorted(lista_meses, key=obter_chave)
 
-@st.cache_data(ttl=1800)
-def carregar_e_consolidar_dados_sharepoint():
+def converter_para_download_url(sharepoint_url):
     """
-    CORREÇÃO MSAL: Autenticação via Microsoft Entra ID moderno
-    Substitui ClientCredential (ACS legado desativado em abril/2026)
+    Converte link de compartilhamento do SharePoint em URL de download direto
     """
     try:
-        # Validar secrets
-        if "sharepoint" not in st.secrets:
-            return None, "❌ Secrets não configurados. Vá em Settings → Secrets no Streamlit Cloud"
+        # Extrair informações da URL
+        parsed = urlparse(sharepoint_url)
         
-        try:
-            site_url = st.secrets["sharepoint"]["site_url"]
-            tenant_id = st.secrets["sharepoint"]["tenant_id"]
-            client_id = st.secrets["sharepoint"]["client_id"]
-            client_secret = st.secrets["sharepoint"]["client_secret"]
-            file_url = st.secrets["sharepoint"]["file_url"]
-        except KeyError as e:
-            return None, f"❌ Secret ausente: {str(e)}. Verifique o nome exato nos secrets."
+        # Verificar se é um link de compartilhamento do SharePoint
+        if ':x:' in sharepoint_url or '/:x:/' in sharepoint_url:
+            # Extrair o ID único do arquivo
+            path_parts = parsed.path.split('/')
+            file_id = None
+            for part in path_parts:
+                if part.startswith('IQBy') or len(part) == 22:  # Formato típico de ID do SharePoint
+                    file_id = part
+                    break
+            
+            if file_id:
+                # Construir URL de download direto
+                domain = parsed.netloc
+                download_url = f"https://{domain}/_layouts/15/download.aspx?UniqueId={file_id}"
+                return download_url
         
-        # Validar valores
-        if not tenant_id or tenant_id.strip() == "":
-            return None, "❌ tenant_id está vazio nos secrets"
-        if not client_id or client_id.strip() == "":
-            return None, "❌ client_id está vazio nos secrets"
-        if not client_secret or client_secret.strip() == "":
-            return None, "❌ client_secret está vazio nos secrets"
+        # Se não for link de compartilhamento, tentar usar a URL diretamente
+        return sharepoint_url
         
-        # CORREÇÃO MSAL: Obter access token via Microsoft Entra ID moderno
-        try:
-            # Extrair tenant domain da site_url
-            parsed_url = urlparse(site_url)
-            sharepoint_domain = parsed_url.netloc  # didiernsf.sharepoint.com
-            
-            # Criar aplicação confidencial MSAL
-            authority = f"https://login.microsoftonline.com/{tenant_id}"
-            app = msal.ConfidentialClientApplication(
-                client_id=client_id,
-                authority=authority,
-                client_credential=client_secret
-            )
-            
-            # Escopo para SharePoint Online
-            scope = [f"https://{sharepoint_domain}/.default"]
-            
-            # Adquirir token para aplicativo (client credentials flow)
-            result = app.acquire_token_for_client(scopes=scope)
-            
-            if "error" in result:
-                return None, f"❌ Erro ao obter token MSAL: {result.get('error_description', result['error'])}"
-            
-            access_token = result["access_token"]
-            
-        except Exception as msal_error:
-            return None, f"❌ Erro na autenticação MSAL: {str(msal_error)}\n\nVerifique:\n1. Tenant ID correto\n2. Client ID correto\n3. Client Secret válido\n4. Permissão Sites.Selected concedida no Azure"
+    except Exception as e:
+        st.error(f"Erro ao converter URL: {str(e)}")
+        return None
+
+@st.cache_data(ttl=1800)
+def carregar_e_consolidar_dados():
+    """
+    NOVA ABORDAGEM: Download direto via URL pública do SharePoint
+    """
+    try:
+        # URL de compartilhamento do SharePoint
+        sharepoint_url = st.secrets["sharepoint"]["sharepoint_url"]
         
-        # CORREÇÃO: Conectar ao SharePoint usando access token (não ClientCredential)
-        try:
-            ctx = ClientContext(site_url).with_access_token(access_token)
-            
-            # Testar conexão
-            web = ctx.web
-            ctx.load(web)
-            ctx.execute_query()
-            
-        except Exception as auth_error:
-            return None, f"❌ Erro ao conectar no SharePoint: {str(auth_error)}\n\nVerifique:\n1. Site URL: {site_url}\n2. Permissão Sites.Selected aplicada ao site via PowerShell/Graph"
+        if not sharepoint_url:
+            return None, "❌ URL do SharePoint não configurada nos secrets"
+        
+        # Converter para URL de download
+        download_url = converter_para_download_url(sharepoint_url)
+        
+        if not download_url:
+            return None, "❌ Não foi possível converter a URL para download"
+        
+        # Configurar headers para simular navegador
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
         
         # Baixar arquivo
-        try:
-            file_object = io.BytesIO()
-            file = ctx.web.get_file_by_server_relative_url(file_url).download(file_object).execute_query()
-        except Exception as file_error:
-            return None, f"❌ Erro ao baixar arquivo: {str(file_error)}\n\nVerifique se file_url está correto:\n{file_url}"
+        with st.spinner("Baixando arquivo do SharePoint..."):
+            try:
+                response = requests.get(download_url, headers=headers, timeout=30, allow_redirects=True)
+            except requests.exceptions.RequestException as e:
+                return None, f"❌ Erro de conexão: {str(e)}\n\nVerifique se o arquivo está compartilhado publicamente."
+            
+            if response.status_code != 200:
+                return None, f"❌ Erro ao baixar arquivo: HTTP {response.status_code}\n\nURL tentada: {download_url}\n\nVerifique se o arquivo está compartilhado publicamente."
+            
+            # Verificar se é um arquivo Excel válido
+            content_type = response.headers.get('content-type', '').lower()
+            content_length = len(response.content)
+            
+            if content_length < 1000:  # Arquivo muito pequeno, provavelmente é uma página de erro
+                return None, f"❌ Arquivo muito pequeno ({content_length} bytes). O arquivo pode não estar público ou a URL está incorreta."
+            
+            if 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' not in content_type and 'application/octet-stream' not in content_type:
+                # Pode ser uma página HTML de erro
+                if 'text/html' in content_type:
+                    return None, f"❌ Resposta HTML recebida. O arquivo pode não estar público.\n\nContent-Type: {content_type}"
         
-        # Ler Excel
-        xl = pd.ExcelFile(file_object, engine='openpyxl')
+        # Ler Excel da memória
+        try:
+            file_object = io.BytesIO(response.content)
+            xl = pd.ExcelFile(file_object, engine='openpyxl')
+        except Exception as e:
+            return None, f"❌ Erro ao ler arquivo Excel: {str(e)}\n\nO arquivo pode estar corrompido ou protegido por senha."
+        
+        # Obter abas de lojas
         abas_lojas = [aba for aba in xl.sheet_names if aba.isdigit()]
         
         if not abas_lojas:
-            return None, f"Nenhuma aba numérica encontrada. Abas disponíveis: {', '.join(xl.sheet_names[:5])}..."
+            return None, f"Nenhuma aba numérica encontrada. Abas disponíveis: {', '.join(xl.sheet_names[:10])}"
+        
+        st.success(f"✅ Arquivo carregado com sucesso! {len(abas_lojas)} lojas encontradas.")
         
         dados_consolidados = []
         for loja in abas_lojas:
@@ -251,16 +204,17 @@ def carregar_e_consolidar_dados_sharepoint():
         return df_final, None
         
     except Exception as e:
-        return None, f"❌ Erro crítico: {type(e).__name__}: {str(e)}"
+        return None, f"❌ Erro: {type(e).__name__}: {str(e)}"
 
 # Interface Principal
 st.title("📊 Dashboard de Controle de Vencimentos — Matriz")
 st.markdown("Consolidação automática de dados de todas as lojas para análise de vencimentos.")
 
-df, erro = carregar_e_consolidar_dados_sharepoint()
+df, erro = carregar_e_consolidar_dados()
 
 if erro:
     st.error(erro)
+    st.info("💡 **Dica**: Verifique se o arquivo está compartilhado publicamente no SharePoint:\n1. Acesse o arquivo no SharePoint\n2. Clique em 'Compartilhar'\n3. Selecione 'Qualquer pessoa com o link'\n4. Copie o link e atualize nos secrets")
 elif df is None or df.empty:
     st.warning("⚠️ Nenhum dado encontrado.")
 else:
