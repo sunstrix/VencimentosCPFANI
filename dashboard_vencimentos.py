@@ -7,7 +7,7 @@ import io
 import requests
 from urllib.parse import urlparse, parse_qs, unquote
 
-# Configuração inicial da página do Streamlit
+# Configuração inicial
 st.set_page_config(
     page_title="Dashboard de Controle de Vencimentos",
     page_icon="📊",
@@ -15,12 +15,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilização customizada
+# Estilização
 st.markdown("""
 <style>
 .main .block-container { padding-top: 2rem; }
 div[data-testid="stMetricValue"] { font-size: 28px; font-weight: bold; color: #1E3A8A; }
-
 @media print {
     @page { size: A4 portrait; margin: 0.8cm; }
     [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"],
@@ -69,96 +68,124 @@ def ordenar_meses_cronologicamente(lista_meses):
         return (99, 0)
     return sorted(lista_meses, key=obter_chave)
 
-def converter_para_download_url(sharepoint_url):
+def extrair_info_sharepoint(url):
     """
-    Converte link de compartilhamento do SharePoint em URL de download direto
+    Extrai informações do SharePoint e cria URL de download direto
     """
     try:
-        # Extrair informações da URL
-        parsed = urlparse(sharepoint_url)
+        # Parse da URL
+        parsed = urlparse(url)
+        query_params = parse_qs(parsed.query)
         
-        # Verificar se é um link de compartilhamento do SharePoint
-        if ':x:' in sharepoint_url or '/:x:/' in sharepoint_url:
-            # Extrair o ID único do arquivo
-            path_parts = parsed.path.split('/')
-            file_id = None
-            for part in path_parts:
-                if part.startswith('IQBy') or len(part) == 22:  # Formato típico de ID do SharePoint
+        # Tentar extrair do parâmetro 'file' ou 'sourcedoc'
+        file_param = query_params.get('file', [None])[0]
+        sourcedoc = query_params.get('sourcedoc', [None])[0]
+        
+        # Extrair caminho do site
+        path_parts = parsed.path.split('/')
+        site_name = None
+        for i, part in enumerate(path_parts):
+            if part == 'sites' and i+1 < len(path_parts):
+                site_name = path_parts[i+1]
+                break
+        
+        # Construir URL base
+        domain = parsed.netloc
+        
+        # Se tiver sourcedoc (GUID), usar formato de download
+        if sourcedoc:
+            # Remover chaves se presente
+            guid = sourcedoc.strip('{}')
+            if site_name:
+                download_url = f"https://{domain}/sites/{site_name}/_layouts/15/download.aspx?UniqueId={guid}"
+            else:
+                download_url = f"https://{domain}/_layouts/15/download.aspx?UniqueId={guid}"
+            return download_url
+        
+        # Se não, tentar construir URL do arquivo
+        if file_param:
+            file_name = unquote(file_param)
+            if site_name:
+                return f"https://{domain}/sites/{site_name}/{file_name}"
+        
+        # Fallback: tentar usar a URL original modificada
+        if '/:x:/' in url:
+            # Link de compartilhamento - extrair ID
+            parts = url.split('/')
+            for i, part in enumerate(parts):
+                if part.startswith('IQBy') or (len(part) == 22 and part[-1] == 'w'):
                     file_id = part
-                    break
-            
-            if file_id:
-                # Construir URL de download direto
-                domain = parsed.netloc
-                download_url = f"https://{domain}/_layouts/15/download.aspx?UniqueId={file_id}"
-                return download_url
+                    return f"https://{domain}/_layouts/15/download.aspx?UniqueId={file_id}"
         
-        # Se não for link de compartilhamento, tentar usar a URL diretamente
-        return sharepoint_url
+        return None
         
     except Exception as e:
-        st.error(f"Erro ao converter URL: {str(e)}")
+        st.error(f"Erro ao extrair info: {str(e)}")
         return None
 
 @st.cache_data(ttl=1800)
 def carregar_e_consolidar_dados():
     """
-    NOVA ABORDAGEM: Download direto via URL pública do SharePoint
+    Download direto via URL pública do SharePoint
     """
     try:
-        # URL de compartilhamento do SharePoint
         sharepoint_url = st.secrets["sharepoint"]["sharepoint_url"]
         
         if not sharepoint_url:
-            return None, "❌ URL do SharePoint não configurada nos secrets"
+            return None, "❌ URL do SharePoint não configurada"
         
-        # Converter para URL de download
-        download_url = converter_para_download_url(sharepoint_url)
+        # Tentar converter para URL de download
+        download_url = extrair_info_sharepoint(sharepoint_url)
         
         if not download_url:
-            return None, "❌ Não foi possível converter a URL para download"
+            download_url = sharepoint_url
         
-        # Configurar headers para simular navegador
+        # Headers para simular navegador
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream,*/*',
         }
         
-        # Baixar arquivo
         with st.spinner("Baixando arquivo do SharePoint..."):
             try:
+                # Primeira tentativa: URL de download direto
                 response = requests.get(download_url, headers=headers, timeout=30, allow_redirects=True)
+                
+                # Se receber HTML, tentar abordagem alternativa
+                if 'text/html' in response.headers.get('content-type', '').lower():
+                    # Tentar com a URL original
+                    response = requests.get(sharepoint_url, headers=headers, timeout=30, allow_redirects=True)
+                
             except requests.exceptions.RequestException as e:
-                return None, f"❌ Erro de conexão: {str(e)}\n\nVerifique se o arquivo está compartilhado publicamente."
+                return None, f"❌ Erro de conexão: {str(e)}"
             
             if response.status_code != 200:
-                return None, f"❌ Erro ao baixar arquivo: HTTP {response.status_code}\n\nURL tentada: {download_url}\n\nVerifique se o arquivo está compartilhado publicamente."
+                return None, f"❌ Erro HTTP {response.status_code}\n\nURL: {download_url}"
             
-            # Verificar se é um arquivo Excel válido
             content_type = response.headers.get('content-type', '').lower()
             content_length = len(response.content)
             
-            if content_length < 1000:  # Arquivo muito pequeno, provavelmente é uma página de erro
-                return None, f"❌ Arquivo muito pequeno ({content_length} bytes). O arquivo pode não estar público ou a URL está incorreta."
+            # Verificar se é HTML (página de login ou erro)
+            if 'text/html' in content_type:
+                return None, f"❌ Resposta HTML recebida. O arquivo pode exigir autenticação.\n\nContent-Type: {content_type}\n\n**Solução**: Use o link de download direto do SharePoint ou configure permissões públicas corretamente."
             
-            if 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' not in content_type and 'application/octet-stream' not in content_type:
-                # Pode ser uma página HTML de erro
-                if 'text/html' in content_type:
-                    return None, f"❌ Resposta HTML recebida. O arquivo pode não estar público.\n\nContent-Type: {content_type}"
+            if content_length < 1000:
+                return None, f"❌ Arquivo muito pequeno ({content_length} bytes)"
         
-        # Ler Excel da memória
+        # Ler Excel
         try:
             file_object = io.BytesIO(response.content)
             xl = pd.ExcelFile(file_object, engine='openpyxl')
         except Exception as e:
-            return None, f"❌ Erro ao ler arquivo Excel: {str(e)}\n\nO arquivo pode estar corrompido ou protegido por senha."
+            return None, f"❌ Erro ao ler Excel: {str(e)}"
         
-        # Obter abas de lojas
+        # Obter abas
         abas_lojas = [aba for aba in xl.sheet_names if aba.isdigit()]
         
         if not abas_lojas:
-            return None, f"Nenhuma aba numérica encontrada. Abas disponíveis: {', '.join(xl.sheet_names[:10])}"
+            return None, f"Nenhuma aba numérica. Abas: {', '.join(xl.sheet_names[:10])}"
         
-        st.success(f"✅ Arquivo carregado com sucesso! {len(abas_lojas)} lojas encontradas.")
+        st.success(f"✅ Arquivo carregado! {len(abas_lojas)} lojas.")
         
         dados_consolidados = []
         for loja in abas_lojas:
@@ -191,7 +218,7 @@ def carregar_e_consolidar_dados():
                     dados_consolidados.append(pd.DataFrame(linhas_finais))
         
         if not dados_consolidados:
-            return None, "Nenhum dado válido extraído"
+            return None, "Nenhum dado extraído"
         
         df_final = pd.concat(dados_consolidados, ignore_index=True)
         df_final['Loja'] = df_final['Loja'].astype(str).str.strip()
@@ -206,7 +233,7 @@ def carregar_e_consolidar_dados():
     except Exception as e:
         return None, f"❌ Erro: {type(e).__name__}: {str(e)}"
 
-# Interface Principal
+# Interface
 st.title("📊 Dashboard de Controle de Vencimentos — Matriz")
 st.markdown("Consolidação automática de dados de todas as lojas para análise de vencimentos.")
 
@@ -214,7 +241,12 @@ df, erro = carregar_e_consolidar_dados()
 
 if erro:
     st.error(erro)
-    st.info("💡 **Dica**: Verifique se o arquivo está compartilhado publicamente no SharePoint:\n1. Acesse o arquivo no SharePoint\n2. Clique em 'Compartilhar'\n3. Selecione 'Qualquer pessoa com o link'\n4. Copie o link e atualize nos secrets")
+    st.info("💡 **Como obter link de download direto:**\n\n"
+            "1. Acesse o arquivo no SharePoint\n"
+            "2. Clique em **Arquivo** → **Informações**\n"
+            "3. Clique em **Copiar caminho**\n"
+            "4. OU: Clique com botão direito no arquivo → **Compartilhar** → **Qualquer pessoa com o link**\n"
+            "5. Cole o link nos secrets")
 elif df is None or df.empty:
     st.warning("⚠️ Nenhum dado encontrado.")
 else:
