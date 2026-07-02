@@ -4,10 +4,8 @@ import plotly.express as px
 import streamlit.components.v1 as components
 import os
 import io
-import msal
-from office365.sharepoint.client_context import ClientContext
-from office365.runtime.auth.token_response import TokenResponse
-from urllib.parse import urlparse
+import requests
+from urllib.parse import urlparse, parse_qs, unquote
 
 # Configuração inicial da página do Streamlit
 st.set_page_config(
@@ -71,57 +69,96 @@ def ordenar_meses_cronologicamente(lista_meses):
         return (99, 0)
     return sorted(lista_meses, key=obter_chave)
 
-@st.cache_data(ttl=1800)
-def carregar_e_consolidar_dados_sharepoint():
+def converter_para_download_url(sharepoint_url):
+    """
+    Converte link de compartilhamento do SharePoint em URL de download direto
+    """
     try:
-        # Validar secrets
-        if "sharepoint" not in st.secrets:
-            return None, "❌ Secrets não configurados"
+        # Extrair informações da URL
+        parsed = urlparse(sharepoint_url)
         
-        site_url = st.secrets["sharepoint"]["site_url"]
-        tenant_id = st.secrets["sharepoint"]["tenant_id"]
-        client_id = st.secrets["sharepoint"]["client_id"]
-        client_secret = st.secrets["sharepoint"]["client_secret"]
-        file_url = st.secrets["sharepoint"]["file_url"]
+        # Verificar se é um link de compartilhamento do SharePoint
+        if ':x:' in sharepoint_url or '/:x:/' in sharepoint_url:
+            # Extrair o ID único do arquivo
+            path_parts = parsed.path.split('/')
+            file_id = None
+            for part in path_parts:
+                if part.startswith('IQBy') or len(part) == 22:  # Formato típico de ID do SharePoint
+                    file_id = part
+                    break
+            
+            if file_id:
+                # Construir URL de download direto
+                domain = parsed.netloc
+                download_url = f"https://{domain}/_layouts/15/download.aspx?UniqueId={file_id}"
+                return download_url
         
-        # MSAL: Obter access token
-        authority = f"https://login.microsoftonline.com/{tenant_id}"
-        app = msal.ConfidentialClientApplication(
-            client_id=client_id,
-            authority=authority,
-            client_credential=client_secret
-        )
+        # Se não for link de compartilhamento, tentar usar a URL diretamente
+        return sharepoint_url
         
-        parsed_url = urlparse(site_url)
-        sharepoint_domain = parsed_url.netloc
-        scope = [f"https://{sharepoint_domain}/.default"]
+    except Exception as e:
+        st.error(f"Erro ao converter URL: {str(e)}")
+        return None
+
+@st.cache_data(ttl=1800)
+def carregar_e_consolidar_dados():
+    """
+    NOVA ABORDAGEM: Download direto via URL pública do SharePoint
+    """
+    try:
+        # URL de compartilhamento do SharePoint
+        sharepoint_url = st.secrets["sharepoint"]["sharepoint_url"]
         
-        result = app.acquire_token_for_client(scopes=scope)
+        if not sharepoint_url:
+            return None, "❌ URL do SharePoint não configurada nos secrets"
         
-        if "error" in result:
-            return None, f"❌ Erro MSAL: {result.get('error_description', result['error'])}"
+        # Converter para URL de download
+        download_url = converter_para_download_url(sharepoint_url)
         
-        access_token = result["access_token"]
+        if not download_url:
+            return None, "❌ Não foi possível converter a URL para download"
         
-        # Conectar ao SharePoint com access token
-        # CORREÇÃO: with_access_token() espera um CALLABLE que retorna um TokenResponse,
-        # e não a string do token diretamente. Passar a string causava o erro
-        # "TypeError: 'str' object is not callable" quando a lib tentava executar o token como função.
-        ctx = ClientContext(site_url).with_access_token(lambda: TokenResponse(access_token=access_token))
-        web = ctx.web
-        ctx.load(web)
-        ctx.execute_query()
+        # Configurar headers para simular navegador
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
         
         # Baixar arquivo
-        file_object = io.BytesIO()
-        file = ctx.web.get_file_by_server_relative_url(file_url).download(file_object).execute_query()
+        with st.spinner("Baixando arquivo do SharePoint..."):
+            try:
+                response = requests.get(download_url, headers=headers, timeout=30, allow_redirects=True)
+            except requests.exceptions.RequestException as e:
+                return None, f"❌ Erro de conexão: {str(e)}\n\nVerifique se o arquivo está compartilhado publicamente."
+            
+            if response.status_code != 200:
+                return None, f"❌ Erro ao baixar arquivo: HTTP {response.status_code}\n\nURL tentada: {download_url}\n\nVerifique se o arquivo está compartilhado publicamente."
+            
+            # Verificar se é um arquivo Excel válido
+            content_type = response.headers.get('content-type', '').lower()
+            content_length = len(response.content)
+            
+            if content_length < 1000:  # Arquivo muito pequeno, provavelmente é uma página de erro
+                return None, f"❌ Arquivo muito pequeno ({content_length} bytes). O arquivo pode não estar público ou a URL está incorreta."
+            
+            if 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' not in content_type and 'application/octet-stream' not in content_type:
+                # Pode ser uma página HTML de erro
+                if 'text/html' in content_type:
+                    return None, f"❌ Resposta HTML recebida. O arquivo pode não estar público.\n\nContent-Type: {content_type}"
         
-        # Ler Excel
-        xl = pd.ExcelFile(file_object, engine='openpyxl')
+        # Ler Excel da memória
+        try:
+            file_object = io.BytesIO(response.content)
+            xl = pd.ExcelFile(file_object, engine='openpyxl')
+        except Exception as e:
+            return None, f"❌ Erro ao ler arquivo Excel: {str(e)}\n\nO arquivo pode estar corrompido ou protegido por senha."
+        
+        # Obter abas de lojas
         abas_lojas = [aba for aba in xl.sheet_names if aba.isdigit()]
         
         if not abas_lojas:
-            return None, "Nenhuma aba numérica encontrada"
+            return None, f"Nenhuma aba numérica encontrada. Abas disponíveis: {', '.join(xl.sheet_names[:10])}"
+        
+        st.success(f"✅ Arquivo carregado com sucesso! {len(abas_lojas)} lojas encontradas.")
         
         dados_consolidados = []
         for loja in abas_lojas:
@@ -173,10 +210,11 @@ def carregar_e_consolidar_dados_sharepoint():
 st.title("📊 Dashboard de Controle de Vencimentos — Matriz")
 st.markdown("Consolidação automática de dados de todas as lojas para análise de vencimentos.")
 
-df, erro = carregar_e_consolidar_dados_sharepoint()
+df, erro = carregar_e_consolidar_dados()
 
 if erro:
     st.error(erro)
+    st.info("💡 **Dica**: Verifique se o arquivo está compartilhado publicamente no SharePoint:\n1. Acesse o arquivo no SharePoint\n2. Clique em 'Compartilhar'\n3. Selecione 'Qualquer pessoa com o link'\n4. Copie o link e atualize nos secrets")
 elif df is None or df.empty:
     st.warning("⚠️ Nenhum dado encontrado.")
 else:
