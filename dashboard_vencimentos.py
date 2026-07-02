@@ -6,8 +6,10 @@ import os
 import io
 import requests
 from urllib.parse import urlparse, parse_qs, unquote
+from office365.runtime.auth.client_credential import ClientCredential
+from office365.sharepoint.client_context import ClientContext
 
-# Configuração inicial
+# Configuração inicial da página do Streamlit
 st.set_page_config(
     page_title="Dashboard de Controle de Vencimentos",
     page_icon="📊",
@@ -15,28 +17,80 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilização
+# Estilização customizada e Regras Corrigidas de Impressão (PDF A4)
 st.markdown("""
 <style>
 .main .block-container { padding-top: 2rem; }
 div[data-testid="stMetricValue"] { font-size: 28px; font-weight: bold; color: #1E3A8A; }
+
+/* Regras de Otimização para salvar em PDF (A4) */
 @media print {
-    @page { size: A4 portrait; margin: 0.8cm; }
-    [data-testid="stSidebar"], [data-testid="stHeader"], [data-testid="stToolbar"],
-    header, footer, .stButton, div.stActionButton { display: none !important; }
-    html, body, [data-testid="stAppViewContainer"], .main, .block-container {
-        zoom: 0.75 !important; height: auto !important; width: 100% !important;
-        overflow: visible !important; position: static !important;
+    @page {
+        size: A4 portrait;
+        margin: 0.8cm;
     }
-    .main .block-container { max-width: 100% !important; padding: 0.3cm !important; }
+
+    /* Esconde barra lateral, cabeçalho e botões */
+    [data-testid="stSidebar"], 
+    [data-testid="stHeader"], 
+    [data-testid="stToolbar"],
+    header, 
+    footer, 
+    .stButton,
+    div.stActionButton {
+        display: none !important;
+    }
+    
+    /* CORREÇÃO: Zoom moderado (0.75) para melhor legibilidade + controle de alturas */
+    html, body, [data-testid="stAppViewContainer"], .main, .block-container {
+        zoom: 0.75 !important;
+        height: auto !important;
+        width: 100% !important;
+        overflow: visible !important;
+        position: static !important;
+    }
+    
+    .main .block-container {
+        max-width: 100% !important;
+        padding: 0.3cm !important;
+    }
+
+    /* Reduz títulos e métricas proporcionalmente */
     h1 { font-size: 20px !important; margin: 5px 0 !important; }
     h2, h3, h4 { font-size: 14px !important; margin: 3px 0 !important; }
-    div[data-testid="stMetricValue"] { font-size: 16px !important; }
-    div[data-testid="stMetricLabel"] { font-size: 10px !important; }
-    body, .stApp { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-    .stPlotlyChart { page-break-inside: avoid !important; max-height: 180px !important; }
-    div[data-testid="stDataFrame"] { page-break-inside: avoid !important; max-height: 200px !important; font-size: 8px !important; }
-    .stColumns { margin-bottom: 5px !important; }
+    
+    div[data-testid="stMetricValue"] { 
+        font-size: 16px !important; 
+        font-weight: bold !important;
+    }
+    
+    div[data-testid="stMetricLabel"] {
+        font-size: 10px !important;
+    }
+
+    /* Força as cores de fundo */
+    body, .stApp {
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
+    }
+    
+    /* Controla altura dos gráficos para caber na página */
+    .stPlotlyChart {
+        page-break-inside: avoid !important;
+        max-height: 180px !important;
+    }
+    
+    /* Controla altura das tabelas */
+    div[data-testid="stDataFrame"] {
+        page-break-inside: avoid !important;
+        max-height: 200px !important;
+        font-size: 8px !important;
+    }
+    
+    /* Ajusta colunas para ficarem mais compactas */
+    .stColumns {
+        margin-bottom: 5px !important;
+    }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -45,14 +99,18 @@ def formatar_vencimento_pt(val):
     val_str = str(val).strip()
     if not val_str or val_str.lower() in ['nan', 'none', 'não informado', 'nat'] or val_str == '00:00:00':
         return "Não Informado"
-    meses_pt = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
-                7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
+    
+    meses_pt = {
+        1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+        7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'
+    }
     try:
         dt = pd.to_datetime(val, errors='coerce')
         if pd.notnull(dt):
             return f"{meses_pt[dt.month]}/{str(dt.year)[-2:]}"
     except:
         pass
+
     if '/' in val_str and not val_str.replace('/', '').isdigit():
         partes = val_str.split('/')
         if len(partes) == 2:
@@ -68,124 +126,109 @@ def ordenar_meses_cronologicamente(lista_meses):
         return (99, 0)
     return sorted(lista_meses, key=obter_chave)
 
-def extrair_info_sharepoint(url):
+def converter_para_download_url(sharepoint_url):
     """
-    Extrai informações do SharePoint e cria URL de download direto
+    NOVA FUNÇÃO: Converte link de compartilhamento do SharePoint em URL de download direto
     """
     try:
+        if not sharepoint_url:
+            return None
+        
         # Parse da URL
-        parsed = urlparse(url)
-        query_params = parse_qs(parsed.query)
+        parsed = urlparse(sharepoint_url)
         
-        # Tentar extrair do parâmetro 'file' ou 'sourcedoc'
-        file_param = query_params.get('file', [None])[0]
-        sourcedoc = query_params.get('sourcedoc', [None])[0]
+        # Se já é uma URL de download direto, retornar como está
+        if '/_layouts/15/download.aspx' in sharepoint_url or 'download=1' in sharepoint_url:
+            return sharepoint_url
         
-        # Extrair caminho do site
-        path_parts = parsed.path.split('/')
-        site_name = None
-        for i, part in enumerate(path_parts):
-            if part == 'sites' and i+1 < len(path_parts):
-                site_name = path_parts[i+1]
-                break
-        
-        # Construir URL base
+        # Extrair domínio
         domain = parsed.netloc
         
-        # Se tiver sourcedoc (GUID), usar formato de download
+        # Tentar extrair ID do arquivo do link de compartilhamento
+        # Formato típico: https://domain.sharepoint.com/:x:/s/SiteName/ID_DO_ARQUIVO?e=token
+        if '/:x:/' in sharepoint_url or '/:w:/' in sharepoint_url:
+            # Extrair o ID do arquivo (geralmente começa com IQ ou tem formato específico)
+            path_parts = parsed.path.split('/')
+            file_id = None
+            
+            for part in path_parts:
+                # IDs do SharePoint geralmente têm 22+ caracteres e contêm letras e números
+                if len(part) >= 20 and any(c.isdigit() for c in part) and any(c.isalpha() for c in part):
+                    file_id = part
+                    break
+            
+            if file_id:
+                # Construir URL de download usando o ID
+                download_url = f"https://{domain}/_layouts/15/download.aspx?UniqueId={file_id}"
+                return download_url
+        
+        # Tentar extrair do parâmetro 'sourcedoc' ou 'file'
+        query_params = parse_qs(parsed.query)
+        sourcedoc = query_params.get('sourcedoc', [None])[0]
+        
         if sourcedoc:
             # Remover chaves se presente
             guid = sourcedoc.strip('{}')
-            if site_name:
-                download_url = f"https://{domain}/sites/{site_name}/_layouts/15/download.aspx?UniqueId={guid}"
-            else:
-                download_url = f"https://{domain}/_layouts/15/download.aspx?UniqueId={guid}"
+            download_url = f"https://{domain}/_layouts/15/download.aspx?UniqueId={guid}"
             return download_url
         
-        # Se não, tentar construir URL do arquivo
-        if file_param:
-            file_name = unquote(file_param)
-            if site_name:
-                return f"https://{domain}/sites/{site_name}/{file_name}"
-        
-        # Fallback: tentar usar a URL original modificada
-        if '/:x:/' in url:
-            # Link de compartilhamento - extrair ID
-            parts = url.split('/')
-            for i, part in enumerate(parts):
-                if part.startswith('IQBy') or (len(part) == 22 and part[-1] == 'w'):
-                    file_id = part
-                    return f"https://{domain}/_layouts/15/download.aspx?UniqueId={file_id}"
-        
+        # Se não conseguir converter, retornar None
         return None
         
     except Exception as e:
-        st.error(f"Erro ao extrair info: {str(e)}")
+        st.warning(f"Aviso ao converter URL: {str(e)}")
         return None
 
-@st.cache_data(ttl=1800)
-def carregar_e_consolidar_dados():
+def validar_conteudo_excel(content, content_type):
     """
-    Download direto via URL pública do SharePoint
+    NOVA FUNÇÃO: Valida se o conteúdo baixado é realmente um arquivo Excel
     """
     try:
-        sharepoint_url = st.secrets["sharepoint"]["sharepoint_url"]
+        # Verificar Content-Type
+        content_type_lower = content_type.lower() if content_type else ''
         
-        if not sharepoint_url:
-            return None, "❌ URL do SharePoint não configurada"
+        # Se for HTML, é erro
+        if 'text/html' in content_type_lower:
+            return False, "❌ Resposta HTML recebida. O arquivo pode exigir autenticação ou não estar público."
         
-        # Tentar converter para URL de download
-        download_url = extrair_info_sharepoint(sharepoint_url)
+        # Verificar tamanho mínimo
+        if len(content) < 1000:
+            return False, f"❌ Arquivo muito pequeno ({len(content)} bytes). Pode ser uma página de erro."
         
-        if not download_url:
-            download_url = sharepoint_url
+        # Verificar assinatura do arquivo (Excel/ZIP começa com PK)
+        if len(content) >= 4:
+            signature = content[:4]
+            # Arquivos Excel (.xlsx) são ZIP e começam com PK (0x50 0x4B)
+            if signature[:2] != b'PK':
+                return False, f"❌ Assinatura de arquivo inválida. Não é um arquivo Excel válido."
         
-        # Headers para simular navegador
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream,*/*',
-        }
+        # Content-Type aceitável
+        valid_types = [
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/octet-stream',
+            'application/vnd.ms-excel',
+            'application/zip'
+        ]
         
-        with st.spinner("Baixando arquivo do SharePoint..."):
-            try:
-                # Primeira tentativa: URL de download direto
-                response = requests.get(download_url, headers=headers, timeout=30, allow_redirects=True)
-                
-                # Se receber HTML, tentar abordagem alternativa
-                if 'text/html' in response.headers.get('content-type', '').lower():
-                    # Tentar com a URL original
-                    response = requests.get(sharepoint_url, headers=headers, timeout=30, allow_redirects=True)
-                
-            except requests.exceptions.RequestException as e:
-                return None, f"❌ Erro de conexão: {str(e)}"
-            
-            if response.status_code != 200:
-                return None, f"❌ Erro HTTP {response.status_code}\n\nURL: {download_url}"
-            
-            content_type = response.headers.get('content-type', '').lower()
-            content_length = len(response.content)
-            
-            # Verificar se é HTML (página de login ou erro)
-            if 'text/html' in content_type:
-                return None, f"❌ Resposta HTML recebida. O arquivo pode exigir autenticação.\n\nContent-Type: {content_type}\n\n**Solução**: Use o link de download direto do SharePoint ou configure permissões públicas corretamente."
-            
-            if content_length < 1000:
-                return None, f"❌ Arquivo muito pequeno ({content_length} bytes)"
+        if content_type_lower and not any(valid_type in content_type_lower for valid_type in valid_types):
+            # Se não é um tipo conhecido mas passou nos outros testes, pode estar ok
+            pass
         
-        # Ler Excel
-        try:
-            file_object = io.BytesIO(response.content)
-            xl = pd.ExcelFile(file_object, engine='openpyxl')
-        except Exception as e:
-            return None, f"❌ Erro ao ler Excel: {str(e)}"
+        return True, "✅ Arquivo Excel válido"
         
-        # Obter abas
+    except Exception as e:
+        return False, f"❌ Erro ao validar conteúdo: {str(e)}"
+
+def processar_excel(file_object):
+    """
+    FUNÇÃO AUXILIAR: Processa o arquivo Excel e consolida dados
+    """
+    try:
+        xl = pd.ExcelFile(file_object, engine='openpyxl')
         abas_lojas = [aba for aba in xl.sheet_names if aba.isdigit()]
         
         if not abas_lojas:
-            return None, f"Nenhuma aba numérica. Abas: {', '.join(xl.sheet_names[:10])}"
-        
-        st.success(f"✅ Arquivo carregado! {len(abas_lojas)} lojas.")
+            return None, f"Nenhuma aba numérica encontrada. Abas disponíveis: {', '.join(xl.sheet_names[:10])}"
         
         dados_consolidados = []
         for loja in abas_lojas:
@@ -218,7 +261,7 @@ def carregar_e_consolidar_dados():
                     dados_consolidados.append(pd.DataFrame(linhas_finais))
         
         if not dados_consolidados:
-            return None, "Nenhum dado extraído"
+            return None, "Nenhum dado válido extraído"
         
         df_final = pd.concat(dados_consolidados, ignore_index=True)
         df_final['Loja'] = df_final['Loja'].astype(str).str.strip()
@@ -231,9 +274,166 @@ def carregar_e_consolidar_dados():
         return df_final, None
         
     except Exception as e:
-        return None, f"❌ Erro: {type(e).__name__}: {str(e)}"
+        return None, f"❌ Erro ao processar Excel: {str(e)}"
 
-# Interface
+@st.cache_data(ttl=1800)
+def carregar_e_consolidar_dados_publico():
+    """
+    NOVA FUNÇÃO: Tenta carregar dados via link público do SharePoint
+    """
+    try:
+        # Verificar se tem URL pública configurada
+        if "sharepoint" not in st.secrets:
+            return None, None  # Sem secrets, tentar próximo método
+        
+        sharepoint_url = st.secrets["sharepoint"].get("sharepoint_url")
+        
+        if not sharepoint_url:
+            return None, None  # Sem URL pública, tentar próximo método
+        
+        # Converter para URL de download
+        download_url = converter_para_download_url(sharepoint_url)
+        
+        if not download_url:
+            return None, "❌ Não foi possível converter a URL para download"
+        
+        # Headers para simular navegador
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/octet-stream,*/*',
+        }
+        
+        with st.spinner("Baixando arquivo do SharePoint (método público)..."):
+            try:
+                response = requests.get(download_url, headers=headers, timeout=30, allow_redirects=True)
+            except requests.exceptions.RequestException as e:
+                return None, f"❌ Erro de conexão: {str(e)}"
+            
+            if response.status_code != 200:
+                return None, f"❌ Erro HTTP {response.status_code} ao baixar arquivo"
+            
+            # Validar conteúdo
+            content_type = response.headers.get('content-type', '')
+            is_valid, message = validar_conteudo_excel(response.content, content_type)
+            
+            if not is_valid:
+                return None, message
+            
+            # Processar Excel
+            file_object = io.BytesIO(response.content)
+            df_final, erro = processar_excel(file_object)
+            
+            if erro:
+                return None, erro
+            
+            st.success(f"✅ Arquivo carregado via link público! {len(df_final['Loja'].unique())} lojas encontradas.")
+            return df_final, None
+            
+    except Exception as e:
+        return None, f"❌ Erro no método público: {str(e)}"
+
+@st.cache_data(ttl=1800)
+def carregar_e_consolidar_dados_sharepoint():
+    """
+    MÉTODO EXISTENTE: Autenticação via ClientCredential (App Registration)
+    Mantido como fallback para quando o método público não funcionar
+    """
+    try:
+        # Validar secrets
+        if "sharepoint" not in st.secrets:
+            return None, "❌ Secrets não configurados. Vá em Settings → Secrets no Streamlit Cloud"
+        
+        try:
+            site_url = st.secrets["sharepoint"]["site_url"]
+            tenant_id = st.secrets["sharepoint"]["tenant_id"]
+            client_id = st.secrets["sharepoint"]["client_id"]
+            client_secret = st.secrets["sharepoint"]["client_secret"]
+            file_url = st.secrets["sharepoint"]["file_url"]
+        except KeyError as e:
+            return None, f"❌ Secret ausente: {str(e)}. Verifique o nome exato nos secrets."
+        
+        # Validar valores
+        if not tenant_id or tenant_id.strip() == "":
+            return None, "❌ tenant_id está vazio nos secrets"
+        if not client_id or client_id.strip() == "":
+            return None, "❌ client_id está vazio nos secrets"
+        if not client_secret or client_secret.strip() == "":
+            return None, "❌ client_secret está vazio nos secrets"
+        
+        # Conectar ao SharePoint
+        credentials = ClientCredential(client_id, client_secret)
+        ctx = ClientContext(site_url).with_credentials(credentials)
+        
+        # Testar conexão
+        try:
+            web = ctx.web
+            ctx.load(web)
+            ctx.execute_query()
+        except Exception as auth_error:
+            return None, f"❌ Erro de autenticação: {str(auth_error)}\n\nVerifique:\n1. Tenant ID: {tenant_id[:20]}...\n2. Client ID: {client_id[:20]}...\n3. Permissões concedidas no Azure"
+        
+        # Baixar arquivo
+        try:
+            file_object = io.BytesIO()
+            file = ctx.web.get_file_by_server_relative_url(file_url).download(file_object).execute_query()
+        except Exception as file_error:
+            return None, f"❌ Erro ao baixar arquivo: {str(file_error)}\n\nVerifique se file_url está correto:\n{file_url}"
+        
+        # Validar conteúdo
+        content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        is_valid, message = validar_conteudo_excel(file_object.getvalue(), content_type)
+        
+        if not is_valid:
+            return None, message
+        
+        # Processar Excel
+        df_final, erro = processar_excel(file_object)
+        
+        if erro:
+            return None, erro
+        
+        st.success(f"✅ Arquivo carregado via autenticação! {len(df_final['Loja'].unique())} lojas encontradas.")
+        return df_final, None
+        
+    except Exception as e:
+        return None, f"❌ Erro crítico: {type(e).__name__}: {str(e)}"
+
+@st.cache_data(ttl=1800)
+def carregar_e_consolidar_dados():
+    """
+    FUNÇÃO PRINCIPAL: Tenta múltiplos métodos de carregamento
+    1. Primeiro tenta método público (link de compartilhamento)
+    2. Se falhar, tenta método autenticado (ClientCredential)
+    """
+    # Tentar método público primeiro
+    df, erro_publico = carregar_e_consolidar_dados_publico()
+    
+    if df is not None:
+        return df, None
+    
+    # Se método público falhou, tentar método autenticado
+    df, erro_auth = carregar_e_consolidar_dados_sharepoint()
+    
+    if df is not None:
+        return df, None
+    
+    # Ambos métodos falharam
+    erro_completo = "❌ Nenhum método de carregamento funcionou.\n\n"
+    
+    if erro_publico:
+        erro_completo += f"**Método Público (link de compartilhamento):**\n{erro_publico}\n\n"
+    
+    if erro_auth:
+        erro_completo += f"**Método Autenticado (ClientCredential):**\n{erro_auth}\n\n"
+    
+    erro_completo += "**Soluções possíveis:**\n"
+    erro_completo += "1. Verifique se o arquivo está compartilhado publicamente no SharePoint\n"
+    erro_completo += "2. Ou configure as credenciais de autenticação nos secrets\n"
+    erro_completo += "3. Verifique se a URL do arquivo está correta\n"
+    
+    return None, erro_completo
+
+# Interface Principal
 st.title("📊 Dashboard de Controle de Vencimentos — Matriz")
 st.markdown("Consolidação automática de dados de todas as lojas para análise de vencimentos.")
 
@@ -241,12 +441,15 @@ df, erro = carregar_e_consolidar_dados()
 
 if erro:
     st.error(erro)
-    st.info("💡 **Como obter link de download direto:**\n\n"
-            "1. Acesse o arquivo no SharePoint\n"
-            "2. Clique em **Arquivo** → **Informações**\n"
-            "3. Clique em **Copiar caminho**\n"
-            "4. OU: Clique com botão direito no arquivo → **Compartilhar** → **Qualquer pessoa com o link**\n"
-            "5. Cole o link nos secrets")
+    st.info("💡 **Como configurar:**\n\n"
+            "**Opção 1 - Link Público (mais simples):**\n"
+            "1. No SharePoint, clique em 'Compartilhar' no arquivo\n"
+            "2. Selecione 'Qualquer pessoa com o link'\n"
+            "3. Copie o link e adicione nos secrets como `sharepoint_url`\n\n"
+            "**Opção 2 - Autenticação (mais seguro):**\n"
+            "1. Crie um App Registration no Azure\n"
+            "2. Conceda permissões Sites.Selected\n"
+            "3. Adicione site_url, tenant_id, client_id, client_secret e file_url nos secrets")
 elif df is None or df.empty:
     st.warning("⚠️ Nenhum dado encontrado.")
 else:
